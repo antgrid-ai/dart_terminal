@@ -239,7 +239,7 @@ jobs:
           generate_release_notes: true
           prerelease: ${{ steps.meta.outputs.prerelease == 'true' }}
           fail_on_unmatched_files: true
-          files: release-assets/*
+          files: pkgs/pty/portable_pty/release-assets/*
 
   publish:
     name: Publish Dart packages
