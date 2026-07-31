@@ -6,57 +6,57 @@
 // dart format off
 
 /// The GitHub release tag from which prebuilt binaries are downloaded.
-const String releaseTag = 'portable_pty-v0.0.5';
+const String releaseTag = 'portable_pty-v0.0.6';
 
 /// Maps platform labels to artifact info and SHA256 hashes.
 const Map<String, AssetHash> assetHashes = {
   'linux-x64': AssetHash(
     tarball: 'pty-linux-x64.tar.gz',
-    hash: '07fb6a32d47ed1b60648d85909912d3e49083225f42db1724fb1a82de6d966d1',
+    hash: '814a1e2859945c2c667b247873edb14cc16c82a27d042bf4abf60e1ce456fdc2',
   ),
   'linux-arm64': AssetHash(
     tarball: 'pty-linux-arm64.tar.gz',
-    hash: 'ad7b5fe7fc717913d9b5ce921a732ef01366f7c4a8307ad809697d679e0a0607',
+    hash: '4e32d1f831368a1f3616ad273a15ea386ad584e93147f8dfd3476f7052706e87',
   ),
   'macos-arm64': AssetHash(
     tarball: 'pty-macos-arm64.tar.gz',
-    hash: 'ec58ff0f8455532f0b4e1bf4e80a50c0936716e4256bc6d513d0fd1d88a55ee6',
+    hash: '2b7e2adbbb7a8bf4e5e145c0627d9913f71792b6566e451ff41e67d215127c0c',
   ),
   'macos-x64': AssetHash(
     tarball: 'pty-macos-x64.tar.gz',
-    hash: '553e33c78afe6e44f0ca6ad8851c01f38884dc9aa895ba2fa7e4ddc7ddab06a5',
+    hash: '13bb51fa872d9afac0c4599b888111bb6540b26b6fe22dff619e1c7925597204',
   ),
   'windows-x64': AssetHash(
     tarball: 'pty-windows-x64.tar.gz',
-    hash: '943c446d13b85be2f87ec00a73b113705cf7fa9e93450613167516d3a4550799',
+    hash: '2bcc219ec8320941ef9e398b5b79696a76b44ef5d78f730b7cc105404715d692',
   ),
   'windows-arm64': AssetHash(
     tarball: 'pty-windows-arm64.tar.gz',
-    hash: 'e218734332aba62312f3415ce878501db2215c86104b5cf968322048c76f0dc1',
+    hash: 'a30482de32698f3e57bedfbc7d19e84b9f996e5ff10d0415fa95901a6aa8597c',
   ),
   'android-arm64': AssetHash(
     tarball: 'pty-android-arm64.tar.gz',
-    hash: '73cc3ac9e4cb7cada59d00be21dbc66af7285be60ff3fa4ee7afad3a7bd4c157',
+    hash: 'be4d2e82542974ed2f7c2fca69838af355a714e464d15cb47dba5d506c1b36ce',
   ),
   'android-arm': AssetHash(
     tarball: 'pty-android-arm.tar.gz',
-    hash: 'c49afe86261251ed9783da476820464adcf23f097bc7de88ad8d7508e61dfb64',
+    hash: '36725416503158ecbf5851f180334068e50016097620a0408c426d61a37590ee',
   ),
   'android-x64': AssetHash(
     tarball: 'pty-android-x64.tar.gz',
-    hash: 'a17fb4d784482e8f0b7ac22b6c3c74da022d743d06096bd9f0a0d92405083afd',
+    hash: '83255613e2ce22f2df2f2127ae2b9c5bcace2d4199bf37c333e633de1c9fb7fa',
   ),
   'ios-arm64': AssetHash(
     tarball: 'pty-ios-arm64.tar.gz',
-    hash: '8a37d912b95c00ff314d0379abd5c108ab1fc71f4891dd66be0a38d6f557bfeb',
+    hash: 'b883e148b6cb30870fa6fc60fa8f59f60f581ccb65bf436f5c68f082498ecb96',
   ),
   'ios-sim-arm64': AssetHash(
     tarball: 'pty-ios-sim-arm64.tar.gz',
-    hash: 'e470fb1d7b2b23b0d4f25fa8bedae6c5ecb0e9fcbbea43fce650a8bbc0315e59',
+    hash: '445f5f61ec6b3319437b9ce995c93bb04b56f75c5d2f7373f374f8fffc03f59f',
   ),
   'ios-sim-x64': AssetHash(
     tarball: 'pty-ios-sim-x64.tar.gz',
-    hash: '14a0c35940ee75bd284ee44c222d8be2081aade58f11ae92970fb2d3d8a6cac4',
+    hash: '45cf8c3cdf340cc2d1560c8ba76a434d29333e5aa42920294573afb12802f4cc',
   ),
 };
 
