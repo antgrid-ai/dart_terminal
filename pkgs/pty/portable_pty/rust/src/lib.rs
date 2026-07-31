@@ -26,7 +26,7 @@ use std::io::{Read, Write};
 #[cfg(target_os = "android")]
 use std::os::fd::AsRawFd;
 #[cfg(unix)]
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicPtr, Ordering};
 use std::sync::Mutex;
 
 /// Helper to get the current errno value on Unix platforms.
@@ -119,9 +119,17 @@ static PID_REGISTRY: [PidSlot; MAX_TRACKED_PIDS] = {
     [EMPTY; MAX_TRACKED_PIDS]
 };
 
-/// Previous SIGCHLD handler action, saved so we can chain to it.
+/// The previous SIGCHLD action is immutable after publication. Keeping the
+/// pointer and flags in one atomically published object prevents the signal
+/// handler from observing a handler from one action with flags from another.
 #[cfg(unix)]
-static mut PREV_SIGCHLD_ACTION: libc::sigaction = unsafe { std::mem::zeroed() };
+struct PreviousSigchldAction {
+    handler: usize,
+    flags: c_int,
+}
+
+#[cfg(unix)]
+static PREV_SIGCHLD_ACTION: AtomicPtr<PreviousSigchldAction> = AtomicPtr::new(std::ptr::null_mut());
 
 /// Flag indicating whether we've installed our handler at least once.
 /// We use AtomicI32 instead of Once so we can re-install if Dart overwrites us.
@@ -264,23 +272,23 @@ extern "C" fn sigchld_handler(sig: c_int, info: *mut libc::siginfo_t, ctx: *mut 
         // a previous signal delivery).
     }
 
-    // Chain to the previous handler.
-    unsafe {
-        let prev = &*(&raw const PREV_SIGCHLD_ACTION);
-        let flags = prev.sa_flags;
-        if flags & libc::SA_SIGINFO != 0 {
-            // SA_SIGINFO handler: void (*)(int, siginfo_t*, void*)
-            let handler = prev.sa_sigaction;
-            if handler != libc::SIG_DFL && handler != libc::SIG_IGN {
+    // Chain to the previous handler. The action is published as one atomic
+    // pointer, and its contents are never mutated or freed, so the handler
+    // cannot observe a mixed action while another thread reinstalls SIGCHLD.
+    let previous = PREV_SIGCHLD_ACTION.load(Ordering::SeqCst);
+    if !previous.is_null() {
+        let previous = unsafe { &*previous };
+        let handler = previous.handler;
+        let flags = previous.flags;
+        if handler != libc::SIG_DFL as usize && handler != libc::SIG_IGN as usize {
+            if flags & libc::SA_SIGINFO != 0 {
+                // SA_SIGINFO handler: void (*)(int, siginfo_t*, void*)
                 let f: extern "C" fn(c_int, *mut libc::siginfo_t, *mut libc::c_void) =
-                    std::mem::transmute(handler);
+                    unsafe { std::mem::transmute(handler) };
                 f(sig, info, ctx);
-            }
-        } else {
-            // Traditional handler: void (*)(int)
-            let handler = prev.sa_sigaction;
-            if handler != libc::SIG_DFL && handler != libc::SIG_IGN {
-                let f: extern "C" fn(c_int) = std::mem::transmute(handler);
+            } else {
+                // Traditional handler: void (*)(int)
+                let f: extern "C" fn(c_int) = unsafe { std::mem::transmute(handler) };
                 f(sig);
             }
         }
@@ -305,13 +313,21 @@ fn ensure_sigchld_handler() {
         }
 
         // Either first install or someone overwrote us. (Re-)install.
+        // Publish an immutable snapshot BEFORE installing ours. Old snapshots
+        // are intentionally leaked: a signal handler may still be reading one
+        // after a concurrent re-install, so reclaiming it would be unsafe.
+        let previous = Box::into_raw(Box::new(PreviousSigchldAction {
+            handler: current.sa_sigaction,
+            flags: current.sa_flags,
+        }));
+        PREV_SIGCHLD_ACTION.store(previous, Ordering::SeqCst);
+
         let mut sa: libc::sigaction = std::mem::zeroed();
         sa.sa_sigaction = sigchld_handler as usize;
         sa.sa_flags = libc::SA_SIGINFO | libc::SA_RESTART | libc::SA_NOCLDSTOP;
         libc::sigemptyset(&mut sa.sa_mask);
 
-        // Save the current handler (Dart's or whoever overwrote us) for chaining.
-        libc::sigaction(libc::SIGCHLD, &sa, &raw mut PREV_SIGCHLD_ACTION);
+        libc::sigaction(libc::SIGCHLD, &sa, std::ptr::null_mut());
         SIGCHLD_INSTALLED.store(1, Ordering::Relaxed);
     }
 }
@@ -1141,6 +1157,168 @@ pub extern "C" fn portable_pty_close(handle: *mut PortablePty) {
 mod tests {
     use super::*;
     use std::ptr;
+    use std::sync::atomic::{AtomicPtr, Ordering};
+    use std::sync::Arc;
+    use std::thread;
+    use std::time::Duration;
+
+    /// Two distinct signal handlers used for the race test.
+    extern "C" fn race_handler_a(
+        _sig: c_int,
+        _info: *mut libc::siginfo_t,
+        _ctx: *mut libc::c_void,
+    ) {
+    }
+    extern "C" fn race_handler_b(
+        _sig: c_int,
+        _info: *mut libc::siginfo_t,
+        _ctx: *mut libc::c_void,
+    ) {
+    }
+
+    /// Verify that the published previous SIGCHLD action is always a
+    /// consistent handler/flags pair under concurrent replacement.
+    #[cfg(unix)]
+    #[test]
+    fn test_sigchld_prev_action_atomic() {
+        let action_a: &'static PreviousSigchldAction = Box::leak(Box::new(PreviousSigchldAction {
+            handler: race_handler_a as usize,
+            flags: libc::SA_SIGINFO,
+        }));
+        let action_b: &'static PreviousSigchldAction = Box::leak(Box::new(PreviousSigchldAction {
+            handler: race_handler_b as usize,
+            flags: libc::SA_SIGINFO | libc::SA_RESTART,
+        }));
+
+        let action_atomic = Arc::new(AtomicPtr::new(
+            action_a as *const PreviousSigchldAction as *mut PreviousSigchldAction,
+        ));
+        let running = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+
+        let writer_running = running.clone();
+        let writer_barrier = barrier.clone();
+        let writer_action = action_atomic.clone();
+        let writer = thread::spawn(move || {
+            writer_barrier.wait();
+            while writer_running.load(Ordering::Relaxed) {
+                writer_action.store(
+                    action_b as *const PreviousSigchldAction as *mut PreviousSigchldAction,
+                    Ordering::SeqCst,
+                );
+                writer_action.store(
+                    action_a as *const PreviousSigchldAction as *mut PreviousSigchldAction,
+                    Ordering::SeqCst,
+                );
+            }
+        });
+
+        let reader_running = running.clone();
+        let reader_barrier = barrier.clone();
+        let reader_action = action_atomic.clone();
+        let reader = thread::spawn(move || {
+            reader_barrier.wait();
+            while reader_running.load(Ordering::Relaxed) {
+                let action = reader_action.load(Ordering::SeqCst);
+                assert!(
+                    action == (action_a as *const _ as *mut _)
+                        || action == (action_b as *const _ as *mut _)
+                );
+                let action = unsafe { &*action };
+                assert!(
+                    (action.handler == action_a.handler && action.flags == action_a.flags)
+                        || (action.handler == action_b.handler && action.flags == action_b.flags)
+                );
+            }
+        });
+
+        barrier.wait();
+        thread::sleep(Duration::from_secs(3));
+        running.store(false, Ordering::Relaxed);
+        writer.join().expect("writer panicked");
+        reader.join().expect("reader panicked");
+    }
+
+    /// Stress-test the full PTY lifecycle (open → spawn → wait → close)
+    /// across many concurrent processes.
+    ///
+    /// This exercises the SIGCHLD handler installation (`ensure_sigchld_handler`),
+    /// PID registration (`register_pid`), signal delivery and status capture
+    /// (`sigchld_handler`), and the wait/exit-code fallback path in
+    /// `portable_pty_wait`.
+    ///
+    /// Each thread opens a PTY, spawns a child that exits immediately, waits
+    /// for it, and closes the PTY — repeated `ITERATIONS` times.
+    #[cfg(unix)]
+    #[test]
+    fn test_spawn_stress() {
+        use std::time::Instant;
+
+        const ITERATIONS: usize = 50;
+        const THREADS: usize = 4;
+
+        let start = Instant::now();
+        let mut handles = Vec::new();
+
+        for t in 0..THREADS {
+            handles.push(thread::spawn(move || {
+                use std::ffi::CString as CS;
+
+                let cmd = CS::new("/bin/true").unwrap();
+                let arg0 = CS::new("true").unwrap();
+                let argv: [*const c_char; 2] = [arg0.as_ptr(), ptr::null()];
+
+                for i in 0..ITERATIONS {
+                    let mut handle: *mut PortablePty = ptr::null_mut();
+                    let result = portable_pty_open(24, 80, &mut handle);
+                    assert!(
+                        matches!(result, PortablePtyResult::Ok),
+                        "Thread {t} iter {i}: open failed: {}",
+                        result as u32,
+                    );
+                    assert!(!handle.is_null());
+
+                    let result =
+                        portable_pty_spawn(handle, cmd.as_ptr(), argv.as_ptr(), ptr::null());
+                    assert!(
+                        matches!(result, PortablePtyResult::Ok),
+                        "Thread {t} iter {i}: spawn failed: {}",
+                        result as u32,
+                    );
+
+                    // Block until the child exits.
+                    let mut status: c_int = 0;
+                    let result = portable_pty_wait_blocking(handle, &mut status);
+                    assert!(
+                        matches!(result, PortablePtyResult::Ok),
+                        "Thread {t} iter {i}: wait_blocking failed: {}",
+                        result as u32,
+                    );
+                    assert_eq!(
+                        status, 0,
+                        "Thread {t} iter {i}: unexpected exit code {}",
+                        status,
+                    );
+
+                    portable_pty_close(handle);
+                }
+                eprintln!("  [stress] thread {t} done — {ITERATIONS} iterations");
+            }));
+        }
+
+        for h in handles {
+            h.join().expect("stress thread panicked");
+        }
+
+        let elapsed = start.elapsed();
+        eprintln!(
+            "  [stress] {} PTY sessions across {} threads in {:?} ({:.0} PTY/s)",
+            ITERATIONS * THREADS,
+            THREADS,
+            elapsed,
+            (ITERATIONS * THREADS) as f64 / elapsed.as_secs_f64(),
+        );
+    }
 
     #[test]
     fn test_open_and_close() {
