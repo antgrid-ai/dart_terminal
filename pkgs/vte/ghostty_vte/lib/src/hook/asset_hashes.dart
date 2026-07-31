@@ -12,51 +12,51 @@ const String releaseTag = 'ghostty_vte-v0.1.4';
 const Map<String, AssetHash> assetHashes = {
   'linux-x64': AssetHash(
     tarball: 'vte-linux-x64.tar.gz',
-    hash: '6c676367a0e79beb767e85336941599e3fc290a4321ce82fcc4bd8b2fdc4a374',
+    hash: '24b41debe04eb4c9cc62a294bc54edb4a678f5608583c551dbc543d4f489e792',
   ),
   'linux-arm64': AssetHash(
     tarball: 'vte-linux-arm64.tar.gz',
-    hash: '2f10277bde3dfbfe9facacf133c1b5dd9beb11a938a19cf3226b16a9c42e74ea',
+    hash: 'cd24625c616353f6e2f62dd540eda20641d3a4b556c0c0ba8ebaa32eadb6ee9d',
   ),
   'macos-arm64': AssetHash(
     tarball: 'vte-macos-arm64.tar.gz',
-    hash: '895bfb1fe7e74c98d7206d2232cddda43cea273755fd758fc83e0136333a3e67',
+    hash: '807c4449f05b2f9e9d2a36cb9d3a7d7bad5fd0b0ec4471ba8e443792126c2be3',
   ),
   'macos-x64': AssetHash(
     tarball: 'vte-macos-x64.tar.gz',
-    hash: '06fe706046996b8ece761935e369ae5745ae00605ac9413b7b9050eeff756523',
+    hash: '85769e6085dbcf97cd5e3dcef456d00ce5ddec9b64d8e40f709f054cb8d13d45',
   ),
   'windows-x64': AssetHash(
     tarball: 'vte-windows-x64.tar.gz',
-    hash: '2050567a04887066231f0118a8ff5583a3b733a86092ff8579fc6100227179d7',
+    hash: 'a4474703c0ce71b103e153bf7db7f4f3b13a804ddf5d45597590f9b10aed109b',
   ),
   'windows-arm64': AssetHash(
     tarball: 'vte-windows-arm64.tar.gz',
-    hash: '02e5fc6ed942a19f20ded2f021c6629653db66b2487d39c5b91d7c5d08300396',
+    hash: '8d67a47dd9b1cbabbbe601e3dcebe5fcbbbe0971859e76bf83aa1f3f005ceb43',
   ),
   'android-arm64': AssetHash(
     tarball: 'vte-android-arm64.tar.gz',
-    hash: '8e6a036d30a5712d05843f7cd78fe76b7f9da3f58ff49044bb870b63b4ee350d',
+    hash: '344e5980d03c7114c9ff623fd4a63dcf7a96119a3469a60ee617dad9adce327f',
   ),
   'android-arm': AssetHash(
     tarball: 'vte-android-arm.tar.gz',
-    hash: '6203a573f37a95e7fb91a345a9e111e6fb3f37ac142ee577aad1aad20f1d1b16',
+    hash: '191b8ce1ca0ca9640a4b4a0d79144c4047f396169cc157cd1b8733a468010379',
   ),
   'android-x64': AssetHash(
     tarball: 'vte-android-x64.tar.gz',
-    hash: '8f8c51efc1f03e843fdab2bd9a23d483aee577e0d429b0b9cbc0c7dd57ba2557',
+    hash: '9abe4b27a280c0fc0e327c752bfb92a87fe40cbe6af69340eb7559f07b3028bb',
   ),
   'ios-arm64': AssetHash(
     tarball: 'vte-ios-arm64.tar.gz',
-    hash: 'c8d9f307b2f69470163b6dd85ca115c721ef3a215e7a9ee96dc625d5ff3f0dc6',
+    hash: '71d259c95a320e914657dddd1f95ff2ad25057c8dc9f92f577073d495777ad3a',
   ),
   'ios-sim-arm64': AssetHash(
     tarball: 'vte-ios-sim-arm64.tar.gz',
-    hash: 'a99d136b1d20c744313226d337c9ddf1faa0800c96e12c610f860e5669946f30',
+    hash: '1b42591923477d55424b06e602291566b312abb9042e02d741dd986b3d93e9bd',
   ),
   'ios-sim-x64': AssetHash(
     tarball: 'vte-ios-sim-x64.tar.gz',
-    hash: '074f79d7104797618e02f7b4304bcf46f19f1aa687e530948f87f5ecaf83fd89',
+    hash: '26b1c62f42f87aebadf896e84ea8667d2235c2ed450574ca0ec76e1adea92bf0',
   ),
 };
 
