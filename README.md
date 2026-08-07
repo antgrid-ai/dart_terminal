@@ -9,9 +9,11 @@
 > need one of the changes below.** Issues and pull requests here are triaged on
 > Antgrid's schedule; no support is promised to anyone else.
 >
-> Prebuilt native libraries still come from **upstream's** releases — this fork
-> publishes none of its own, and the downloaders in `tool/` and each package's
-> `bin/setup.dart` point at `kingwill101/dart_terminal` by design.
+> Prebuilt native libraries come from two places, on purpose: **PTY** is built
+> and released here, because upstream's Android libraries are 4 KB page-aligned
+> and Play rejects them. **VTE** is unmodified, so it still resolves from
+> `kingwill101/dart_terminal`. `tool/prebuilt.dart` and each package's
+> `bin/setup.dart` pick the right host per package.
 
 ### What's different from upstream
 
@@ -24,6 +26,14 @@
   `ffigen.yaml` that was never checked in, which is why the bindings drifted at
   all. **Affects every 0.1.4 consumer, not only Antgrid.**
 - **`ghostty_vte_flutter` — Antgrid's terminal engine and rendering patches.**
+- **`portable_pty` — 16 KB page-aligned Android libraries.** Upstream ships
+  `.so` files whose LOAD segments are aligned at `0x1000`, which Google Play
+  rejects outright. The alignment comes from linker flags rather than the NDK
+  version — measured on `aarch64-linux-android`, NDK r27c gives `0x1000` without
+  them and `0x4000` with them — so they live in the crate's `.cargo/config.toml`
+  and apply to CI, local builds, and source builds alike. A `readelf` gate in
+  the release workflow fails the build if any Android library regresses.
+  **Affects every consumer shipping to Play, not only Antgrid.**
 
 ### What a green VTE badge does and doesn't mean
 

@@ -8,8 +8,8 @@ description: >-
 # Android native libraries are rebuilt 16 KB-aligned, so the shipped bytes are
 # not upstream's. Build metadata is ignored for constraint solving, so `^0.0.6`
 # consumers are unaffected — which is why this cannot be `-antgrid.1`, a semver
-# pre-release that `^0.0.6` would refuse. The release tag uses the dash form
-# instead, to keep `+` out of git refs and URLs; the two intentionally differ.
+# pre-release that `^0.0.6` would refuse. The release tag carries the same
+# suffix; see native_prebuilt.yaml for why it must not use a dash either.
 version: 0.0.6+antgrid.1
 
 repository: https://github.com/bharathm03/dart_terminal/tree/master/pkgs/pty/portable_pty

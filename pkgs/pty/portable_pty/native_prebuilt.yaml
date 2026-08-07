@@ -20,16 +20,12 @@ source:
 release:
   provider: github
   repository: bharathm03/dart_terminal
-  # Deliberately not `+antgrid.1` to match the pubspec version: a `+` has to
-  # survive a git ref, a release URL, and every downloader in tool/. The version
-  # cannot take the dash instead — `0.0.6-antgrid.1` is a semver pre-release and
-  # `^0.0.6` would stop resolving it.
-  #
-  # Cut this release by dispatching the workflow with an explicit tag input, not
-  # by pushing the tag: the tag-push path infers prerelease by grepping the
-  # version for a dash, which would skip the lockfile and asset-hash jobs and
-  # leave both stale.
-  tag: portable_pty-v0.0.6-antgrid.1
+  # `+antgrid.N`, never `-antgrid.N`. The release job derives the prerelease flag
+  # by grepping the version for a dash, so a dash-suffixed tag is silently
+  # classed a prerelease — which skips the lockfile and asset-hash jobs and
+  # leaves both stale against the release they describe. A `+` has no such
+  # effect, and it keeps the tag equal to the pubspec version.
+  tag: portable_pty-v0.0.6+antgrid.1
 
 variables:
   cargo_manifest: "{{ source.path }}/rust/Cargo.toml"
