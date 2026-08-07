@@ -1,10 +1,16 @@
 name: VTE
 
 on:
+  workflow_dispatch:
   push:
     branches: [master, main]
     paths:
       - "pkgs/vte/**"
+      # test-flutter-android-integration builds the example app, which links
+      # portable_pty's native assets — so a PTY-only change can break this
+      # workflow. Without this, such a break stays invisible until someone
+      # later touches pkgs/vte for an unrelated reason.
+      - "pkgs/pty/**"
       - "pubspec.yaml"
       - "tool/apply_ghostty_vte_source_patches.sh"
       - "tool/verify_vte_android_libc.sh"
@@ -13,6 +19,7 @@ on:
     branches: [master, main]
     paths:
       - "pkgs/vte/**"
+      - "pkgs/pty/**"
       - "pubspec.yaml"
       - "tool/apply_ghostty_vte_source_patches.sh"
       - "tool/verify_vte_android_libc.sh"
