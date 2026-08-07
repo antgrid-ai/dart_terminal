@@ -615,101 +615,113 @@ void main() {
     expect(find.byKey(const ValueKey('terminalPainter')), findsOneWidget);
   });
 
-  group('setFocused (DEC 1004 focus reporting)', () {
-    test('latches desired blur and emits CSI O once mode 1004 is enabled', () {
-      final controller = GhosttyTerminalController();
-      final sent = <int>[];
-      controller.attachExternalTransport(
-        writeBytes: (b) {
-          sent.addAll(b);
-          return true;
+  group(
+    'setFocused (DEC 1004 focus reporting)',
+    () {
+      test(
+        'latches desired blur and emits CSI O once mode 1004 is enabled',
+        () {
+          final controller = GhosttyTerminalController();
+          final sent = <int>[];
+          controller.attachExternalTransport(
+            writeBytes: (b) {
+              sent.addAll(b);
+              return true;
+            },
+          );
+
+          controller.setFocused(false); // mode off → nothing emitted yet
+          expect(sent, isEmpty);
+
+          controller.appendOutputBytes(
+            '\x1b[?1004h'.codeUnits,
+          ); // enable → flush
+          expect(String.fromCharCodes(sent), '\x1b[O');
+
+          sent.clear();
+          controller.appendOutputBytes(
+            'x'.codeUnits,
+          ); // no state change → no resend
+          expect(sent, isEmpty);
         },
       );
 
-      controller.setFocused(false); // mode off → nothing emitted yet
-      expect(sent, isEmpty);
+      test('emits CSI I when focused after mode enabled', () {
+        final controller = GhosttyTerminalController();
+        final sent = <int>[];
+        controller.attachExternalTransport(
+          writeBytes: (b) {
+            sent.addAll(b);
+            return true;
+          },
+        );
 
-      controller.appendOutputBytes('\x1b[?1004h'.codeUnits); // enable → flush
-      expect(String.fromCharCodes(sent), '\x1b[O');
+        controller.appendOutputBytes('\x1b[?1004h'.codeUnits);
+        controller.setFocused(true);
+        expect(String.fromCharCodes(sent), '\x1b[I');
+      });
 
-      sent.clear();
-      controller.appendOutputBytes(
-        'x'.codeUnits,
-      ); // no state change → no resend
-      expect(sent, isEmpty);
-    });
+      test('re-asserts desired state after mode 1004 toggles off then on', () {
+        final controller = GhosttyTerminalController();
+        final sent = <int>[];
+        controller.attachExternalTransport(
+          writeBytes: (b) {
+            sent.addAll(b);
+            return true;
+          },
+        );
 
-    test('emits CSI I when focused after mode enabled', () {
-      final controller = GhosttyTerminalController();
-      final sent = <int>[];
-      controller.attachExternalTransport(
-        writeBytes: (b) {
-          sent.addAll(b);
-          return true;
-        },
-      );
+        controller.setFocused(false);
+        controller.appendOutputBytes('\x1b[?1004h'.codeUnits); // → CSI O
+        sent.clear();
+        controller.appendOutputBytes('\x1b[?1004l'.codeUnits); // disable
+        controller.appendOutputBytes(
+          '\x1b[?1004h'.codeUnits,
+        ); // re-enable → resend
+        expect(String.fromCharCodes(sent), '\x1b[O');
+      });
 
-      controller.appendOutputBytes('\x1b[?1004h'.codeUnits);
-      controller.setFocused(true);
-      expect(String.fromCharCodes(sent), '\x1b[I');
-    });
+      test('emits nothing while mode 1004 is never enabled', () {
+        final controller = GhosttyTerminalController();
+        final sent = <int>[];
+        controller.attachExternalTransport(
+          writeBytes: (b) {
+            sent.addAll(b);
+            return true;
+          },
+        );
 
-    test('re-asserts desired state after mode 1004 toggles off then on', () {
-      final controller = GhosttyTerminalController();
-      final sent = <int>[];
-      controller.attachExternalTransport(
-        writeBytes: (b) {
-          sent.addAll(b);
-          return true;
-        },
-      );
+        controller.setFocused(true);
+        controller.appendOutputBytes('hello world'.codeUnits);
+        expect(sent, isEmpty);
+      });
 
-      controller.setFocused(false);
-      controller.appendOutputBytes('\x1b[?1004h'.codeUnits); // → CSI O
-      sent.clear();
-      controller.appendOutputBytes('\x1b[?1004l'.codeUnits); // disable
-      controller.appendOutputBytes(
-        '\x1b[?1004h'.codeUnits,
-      ); // re-enable → resend
-      expect(String.fromCharCodes(sent), '\x1b[O');
-    });
+      test('does not latch when writeBytes fails, retries on next flush', () {
+        final controller = GhosttyTerminalController();
+        var accept = false;
+        final sent = <int>[];
+        controller.attachExternalTransport(
+          writeBytes: (b) {
+            if (!accept) return false;
+            sent.addAll(b);
+            return true;
+          },
+        );
 
-    test('emits nothing while mode 1004 is never enabled', () {
-      final controller = GhosttyTerminalController();
-      final sent = <int>[];
-      controller.attachExternalTransport(
-        writeBytes: (b) {
-          sent.addAll(b);
-          return true;
-        },
-      );
+        controller.appendOutputBytes('\x1b[?1004h'.codeUnits);
+        controller.setFocused(true); // write rejected → not latched
+        expect(sent, isEmpty);
 
-      controller.setFocused(true);
-      controller.appendOutputBytes('hello world'.codeUnits);
-      expect(sent, isEmpty);
-    });
-
-    test('does not latch when writeBytes fails, retries on next flush', () {
-      final controller = GhosttyTerminalController();
-      var accept = false;
-      final sent = <int>[];
-      controller.attachExternalTransport(
-        writeBytes: (b) {
-          if (!accept) return false;
-          sent.addAll(b);
-          return true;
-        },
-      );
-
-      controller.appendOutputBytes('\x1b[?1004h'.codeUnits);
-      controller.setFocused(true); // write rejected → not latched
-      expect(sent, isEmpty);
-
-      accept = true;
-      controller.appendOutputBytes(''.codeUnits); // flush retries → CSI I
-      expect(String.fromCharCodes(sent), '\x1b[I');
-    });
-  });
+        accept = true;
+        controller.appendOutputBytes(''.codeUnits); // flush retries → CSI I
+        expect(String.fromCharCodes(sent), '\x1b[I');
+      });
+      // `skip:`, not the early-return guard the rest of this file uses — that
+      // form reports *passed* while running nothing. These exercise the real
+      // parser, so a host with the native asset must actually run them.
+    },
+    skip: hasNativeTerminal ? null : 'needs the native ghostty_vte asset',
+  );
 }
 
 class _LaunchMetadataController extends GhosttyTerminalController {

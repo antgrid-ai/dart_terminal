@@ -25,18 +25,18 @@
   all. **Affects every 0.1.4 consumer, not only Antgrid.**
 - **`ghostty_vte_flutter` — Antgrid's terminal engine and rendering patches.**
 
-### Known-failing tests
+### What a green VTE badge does and doesn't mean
 
-`VTE / test-flutter` reports **5 failures**, all in the DEC-1004 focus-reporting
-group. They reach the native engine ungated, and `flutter test` does not resolve
-this package's native assets, so they cannot pass under `flutter_tester` on any
-host.
+`VTE / test-flutter` builds no native library and downloads no prebuilt one, so
+`flutter_tester` never resolves this package's native assets and every
+engine-backed test is inert there. Most of them look green because they guard
+with an early `return` *inside the test body*, which reports **passed**, not
+skipped. The engine is genuinely exercised only by `dart test` in
+`pkgs/vte/ghostty_vte`, which CI does not run — `test-native` is `if: false`
+upstream. Run it locally before trusting a change to the bindings.
 
-The other native-dependent tests are green here for a reason worth knowing: they
-guard with an early `return` *inside the test body*, which reports **passed**,
-not skipped. The engine is genuinely exercised only by `dart test` in
-`pkgs/vte/ghostty_vte` — which CI does not run, because `test-native` is
-`if: false` upstream. Treat a green VTE badge accordingly.
+New tests here use `skip:` instead, so the same absence reports as skipped and
+the count stays honest.
 
 Dart & Flutter packages for building terminal applications. This monorepo
 provides two complementary package groups — a **VT engine** powered by
