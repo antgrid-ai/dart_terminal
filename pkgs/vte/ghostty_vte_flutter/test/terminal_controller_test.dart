@@ -4,21 +4,11 @@ import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ghostty_vte_flutter/ghostty_vte_flutter.dart';
 
-final bool _hasNativeTerminal = _hasNativeTerminalSupport();
-
-bool _hasNativeTerminalSupport() {
-  try {
-    final terminal = GhosttyVt.newTerminal(cols: 80, rows: 24);
-    terminal.close();
-    return true;
-  } catch (_) {
-    return false;
-  }
-}
+import 'support/native_terminal.dart';
 
 void main() {
   test('controller parses OSC title and CRLF-delimited line buffer', () {
-    if (!_hasNativeTerminal) {
+    if (!hasNativeTerminal) {
       return;
     }
 
@@ -36,7 +26,7 @@ void main() {
   test(
     'controller exposes a native render snapshot for live viewport data',
     () {
-      if (!_hasNativeTerminal) {
+      if (!hasNativeTerminal) {
         return;
       }
 
@@ -49,6 +39,101 @@ void main() {
       expect(renderSnapshot, isNotNull);
       expect(renderSnapshot!.rowsData, isNotEmpty);
       expect(renderSnapshot.rowsData.first.cells.first.text, 'A');
+    },
+  );
+
+  test(
+    'engine viewport scrolls through scrollback and renders history rows',
+    () {
+      if (!hasNativeTerminal) {
+        return;
+      }
+
+      // 6 visible rows, plenty of scrollback. Emit 30 distinguishable lines so
+      // the live viewport shows only the tail and history must be scrolled to.
+      final controller = GhosttyTerminalController(
+        initialCols: 20,
+        initialRows: 6,
+      );
+      addTearDown(controller.dispose);
+
+      final buffer = StringBuffer();
+      for (var i = 0; i < 30; i++) {
+        buffer.write('line$i\r\n');
+      }
+      controller.appendDebugOutput(buffer.toString());
+
+      String firstCellOfRow(GhosttyTerminalRenderSnapshot snap, int row) =>
+          snap.rowsData[row].cells
+              .map((c) => c.text)
+              .join()
+              .trimRight();
+
+      // Following the bottom: the viewport shows the latest lines, not line0.
+      expect(controller.isViewportAtBottom, isTrue);
+      final atBottom = controller.renderSnapshot!;
+      final bottomText = atBottom.rowsData
+          .map((r) => r.cells.map((c) => c.text).join().trimRight())
+          .where((t) => t.isNotEmpty)
+          .toList();
+      expect(bottomText.any((t) => t.startsWith('line2')), isTrue);
+      expect(bottomText.contains('line0'), isFalse);
+
+      // Scroll to the very top — the engine must render scrollback row0.
+      controller.scrollViewportToTop();
+      expect(controller.isViewportAtBottom, isFalse);
+      final atTop = controller.renderSnapshot!;
+      expect(firstCellOfRow(atTop, 0), 'line0');
+
+      // The engine scrollbar reports the viewport pinned at the top.
+      final bar = controller.viewportScrollbar!;
+      expect(bar.offset, 0);
+      expect(bar.total, greaterThan(bar.length));
+
+      // Scroll back to the bottom — follow state re-pins and the tail returns.
+      controller.scrollViewportToBottom();
+      expect(controller.isViewportAtBottom, isTrue);
+      final backToBottom = controller.renderSnapshot!;
+      final tailText = backToBottom.rowsData
+          .map((r) => r.cells.map((c) => c.text).join().trimRight())
+          .where((t) => t.isNotEmpty)
+          .toList();
+      expect(tailText.contains('line0'), isFalse);
+      expect(tailText.any((t) => t.startsWith('line2')), isTrue);
+    },
+  );
+
+  test(
+    'scrolled-up viewport is held while new output is ingested',
+    () {
+      if (!hasNativeTerminal) {
+        return;
+      }
+
+      final controller = GhosttyTerminalController(
+        initialCols: 20,
+        initialRows: 6,
+      );
+      addTearDown(controller.dispose);
+
+      final buffer = StringBuffer();
+      for (var i = 0; i < 30; i++) {
+        buffer.write('line$i\r\n');
+      }
+      controller.appendDebugOutput(buffer.toString());
+
+      controller.scrollViewportToTop();
+      expect(controller.isViewportAtBottom, isFalse);
+      final offsetBefore = controller.viewportScrollbar!.offset;
+
+      // New output arrives while scrolled up: viewport must NOT snap to bottom.
+      controller.appendDebugOutput('fresh-tail\r\n');
+      expect(controller.isViewportAtBottom, isFalse);
+      expect(
+        controller.viewportScrollbar!.offset,
+        offsetBefore,
+        reason: 'scrolled-up viewport offset should be preserved on new output',
+      );
     },
   );
 
@@ -108,7 +193,7 @@ void main() {
   });
 
   test('native controller uses the shared PTY backend on Unix', () async {
-    if (!_hasNativeTerminal) {
+    if (!hasNativeTerminal) {
       return;
     }
 
@@ -132,7 +217,7 @@ void main() {
   });
 
   test('render snapshot resolves hyperlink cells and explicit color flags', () {
-    if (!_hasNativeTerminal) {
+    if (!hasNativeTerminal) {
       return;
     }
 
@@ -164,7 +249,7 @@ void main() {
   test(
     'render snapshot distinguishes explicit and implicit underline colors',
     () {
-      if (!_hasNativeTerminal) {
+      if (!hasNativeTerminal) {
         return;
       }
 
@@ -198,7 +283,7 @@ void main() {
   );
 
   test('render snapshot preserves unresolved background as transparent', () {
-    if (!_hasNativeTerminal) {
+    if (!hasNativeTerminal) {
       return;
     }
 
@@ -218,7 +303,7 @@ void main() {
   test(
     'render snapshot preserves wide-cell widths for native viewport data',
     () {
-      if (!_hasNativeTerminal) {
+      if (!hasNativeTerminal) {
         return;
       }
 
@@ -237,8 +322,261 @@ void main() {
     },
   );
 
+  test('applyEngineColors configures the engine default palette and fg/bg', () {
+    if (!hasNativeTerminal) {
+      return;
+    }
+
+    final controller = GhosttyTerminalController(
+      initialCols: 20,
+      initialRows: 5,
+    );
+    addTearDown(controller.dispose);
+
+    controller.applyEngineColors(
+      ansiPalette: List<Color>.filled(16, const Color(0xFF112233)),
+      foreground: const Color(0xFFCCCCCC),
+      background: const Color(0xFF09090B),
+      cursor: const Color(0xFFFFFFFF),
+    );
+
+    final colors = controller.terminal.defaultColors;
+    expect(colors.palette.length, 256);
+    expect(
+      (colors.foreground!.r, colors.foreground!.g, colors.foreground!.b),
+      (0xCC, 0xCC, 0xCC),
+    );
+    expect(
+      (colors.background!.r, colors.background!.g, colors.background!.b),
+      (0x09, 0x09, 0x0B),
+    );
+    expect(
+      (colors.cursor!.r, colors.cursor!.g, colors.cursor!.b),
+      (0xFF, 0xFF, 0xFF),
+    );
+  });
+
+  test('engine colors are re-applied after clear() resets the terminal', () {
+    if (!hasNativeTerminal) {
+      return;
+    }
+
+    final controller = GhosttyTerminalController(
+      initialCols: 20,
+      initialRows: 5,
+    );
+    addTearDown(controller.dispose);
+
+    controller.applyEngineColors(
+      ansiPalette: List<Color>.filled(16, const Color(0xFF112233)),
+      foreground: const Color(0xFFCCCCCC),
+      background: const Color(0xFF09090B),
+    );
+    controller.clear();
+
+    final colors = controller.terminal.defaultColors;
+    expect(
+      (colors.foreground!.r, colors.foreground!.g, colors.foreground!.b),
+      (0xCC, 0xCC, 0xCC),
+    );
+  });
+
+  test('scrollViewportToOffsetFromBottom positions and clamps the viewport', () {
+    if (!hasNativeTerminal) {
+      return;
+    }
+    final controller = GhosttyTerminalController(initialCols: 20, initialRows: 6);
+    addTearDown(controller.dispose);
+
+    final buffer = StringBuffer();
+    for (var i = 0; i < 30; i++) {
+      buffer.write('line$i\r\n');
+    }
+    controller.appendDebugOutput(buffer.toString());
+
+    controller.scrollViewportToOffsetFromBottom(0);
+    expect(controller.isViewportAtBottom, isTrue);
+
+    controller.scrollViewportToOffsetFromBottom(5);
+    final bar = controller.viewportScrollbar!;
+    expect(bar.total - bar.length - bar.offset, 5);
+    expect(controller.isViewportAtBottom, isFalse);
+
+    controller.scrollViewportToOffsetFromBottom(100000);
+    expect(controller.viewportScrollbar!.offset, 0);
+  });
+
+  test('cursor leaves the viewport when scrolled into history', () {
+    if (!hasNativeTerminal) {
+      return;
+    }
+    final controller = GhosttyTerminalController(initialCols: 20, initialRows: 6);
+    addTearDown(controller.dispose);
+
+    final buffer = StringBuffer();
+    for (var i = 0; i < 40; i++) {
+      buffer.write('row$i\r\n');
+    }
+    controller.appendDebugOutput(buffer.toString());
+
+    // At the bottom the cursor reports a viewport position.
+    controller.scrollViewportToOffsetFromBottom(0);
+    final bottomCursor = controller.renderSnapshot!.cursor;
+    expect(bottomCursor.hasViewportPosition, isTrue);
+
+    // Scrolled up into history, the live cursor (at the active bottom) is no
+    // longer inside the viewport — so the renderState paint path must not draw
+    // a phantom cursor in scrollback. Either the engine drops the viewport
+    // position, or it reports a row outside the visible rows.
+    controller.scrollViewportToOffsetFromBottom(30);
+    final scrolled = controller.renderSnapshot!;
+    final cursor = scrolled.cursor;
+    final visibleRows = scrolled.rowsData.length;
+    final inViewport = cursor.hasViewportPosition &&
+        cursor.row != null &&
+        cursor.row! >= 0 &&
+        cursor.row! < visibleRows;
+    expect(inViewport, isFalse);
+  });
+
+  test('engine renderSnapshot surfaces scrollback rows when scrolled up', () {
+    if (!hasNativeTerminal) {
+      return;
+    }
+    final controller = GhosttyTerminalController(initialCols: 20, initialRows: 6);
+    addTearDown(controller.dispose);
+    final buffer = StringBuffer();
+    for (var i = 0; i < 40; i++) {
+      buffer.write('row$i\r\n');
+    }
+    controller.appendDebugOutput(buffer.toString());
+
+    String topRowText() => controller.renderSnapshot!.rowsData.first.cells
+        .map((c) => c.text)
+        .join()
+        .trimRight();
+
+    // At the bottom: the top visible row is a late row, not row0.
+    controller.scrollViewportToOffsetFromBottom(0);
+    expect(controller.isViewportAtBottom, isTrue);
+    final bottomTop = topRowText();
+    expect(bottomTop, matches(RegExp(r'^row\d+$')));
+
+    // Scrolled up: the top visible row is an earlier scrollback row.
+    controller.scrollViewportToOffsetFromBottom(20);
+    expect(controller.isViewportAtBottom, isFalse);
+    final scrolledTop = topRowText();
+    expect(scrolledTop, matches(RegExp(r'^row\d+$')));
+    final bottomIdx = int.parse(bottomTop.substring(3));
+    final scrolledIdx = int.parse(scrolledTop.substring(3));
+    expect(scrolledIdx, lessThan(bottomIdx)); // scrolled up = earlier content
+
+    // Returning to the bottom re-pins to the latest content.
+    controller.scrollViewportToOffsetFromBottom(0);
+    expect(controller.isViewportAtBottom, isTrue);
+    expect(topRowText(), bottomTop);
+  });
+
+  test('follow state tracks scroll target before the terminal exists', () {
+    if (!hasNativeTerminal) {
+      return;
+    }
+    // Freshly-constructed controller with no writes yet: the native terminal
+    // has not been created, so these scroll calls hit the null-terminal branch.
+    final controller = GhosttyTerminalController(initialCols: 20, initialRows: 6);
+    addTearDown(controller.dispose);
+
+    // Driving an offset away from the bottom must clear follow so the first
+    // output after terminal creation honors the requested scroll position.
+    controller.scrollViewportToOffsetFromBottom(20);
+    expect(controller.isViewportAtBottom, isFalse);
+
+    // Returning to the bottom (offset 0) re-pins follow.
+    controller.scrollViewportToOffsetFromBottom(0);
+    expect(controller.isViewportAtBottom, isTrue);
+  });
+
+  test(
+    'renderState snapshot carries foreground, background, and underline attributes',
+    () {
+      if (!hasNativeTerminal) {
+        return;
+      }
+      final controller = GhosttyTerminalController(
+        initialCols: 40,
+        initialRows: 6,
+      );
+      addTearDown(controller.dispose);
+
+      // Row 0: red foreground. Row 1: blue background. Row 2: underlined.
+      controller.appendDebugOutput(
+        '\x1b[31mRED\x1b[0m\r\n'
+        '\x1b[44mBG\x1b[0m\r\n'
+        '\x1b[4mUL\x1b[0m\r\n',
+      );
+
+      final snapshot = controller.renderSnapshot;
+      expect(snapshot, isNotNull);
+      final rows = snapshot!.rowsData;
+      expect(rows.length, greaterThanOrEqualTo(3));
+
+      // Foreground: SGR 31 maps to palette index 1 (red).
+      final redCell = rows[0].cells.first;
+      expect(redCell.text, 'R');
+      expect(redCell.style.hasExplicitForeground, isTrue);
+      expect(redCell.style.foregroundToken?.paletteIndex, 1);
+
+      // Background: SGR 44 maps to palette index 4 (blue).
+      final bgCell = rows[1].cells.first;
+      expect(bgCell.text, 'B');
+      expect(bgCell.style.hasExplicitBackground, isTrue);
+      expect(bgCell.style.backgroundToken?.paletteIndex, 4);
+
+      // Underline: SGR 4 sets single underline.
+      final ulCell = rows[2].cells.first;
+      expect(ulCell.text, 'U');
+      expect(
+        ulCell.style.underline,
+        isNot(GhosttySgrUnderline.GHOSTTY_SGR_UNDERLINE_NONE),
+      );
+    },
+  );
+
+  test('selection text and hyperlinks resolve through the snapshot', () {
+    if (!hasNativeTerminal) {
+      return;
+    }
+    final controller = GhosttyTerminalController(initialCols: 40, initialRows: 6);
+    addTearDown(controller.dispose);
+    controller.appendDebugOutput(
+      '\x1b[31mhello\x1b[0m world\r\n'
+      'visit https://example.com now\r\n',
+    );
+
+    // Colored text still copies as plain text (color runs become unread once
+    // the formatter color paint branch is deleted; the snapshot keeps the text).
+    final sel = controller.snapshot.lineSelectionBetweenRows(0, 0);
+    expect(sel, isNotNull);
+    expect(controller.snapshot.textForSelection(sel!).trimRight(), 'hello world');
+
+    // Word selection still works.
+    final word = controller.snapshot.wordSelectionAt(
+      const GhosttyTerminalCellPosition(row: 0, col: 2),
+    );
+    expect(word, isNotNull);
+
+    // Hyperlink resolution through the snapshot still works (the URL-detection
+    // path used by the off-screen `_resolveHyperlinkUriAt` fallback).
+    expect(
+      controller.snapshot.hyperlinkAt(
+        const GhosttyTerminalCellPosition(row: 1, col: 10),
+      ),
+      'https://example.com',
+    );
+  });
+
   testWidgets('terminal view renders custom painter', (tester) async {
-    if (!_hasNativeTerminal) {
+    if (!hasNativeTerminal) {
       return;
     }
 
@@ -259,6 +597,98 @@ void main() {
 
     expect(find.byType(GhosttyTerminalView), findsOneWidget);
     expect(find.byKey(const ValueKey('terminalPainter')), findsOneWidget);
+  });
+
+  group('setFocused (DEC 1004 focus reporting)', () {
+    test('latches desired blur and emits CSI O once mode 1004 is enabled', () {
+      final controller = GhosttyTerminalController();
+      final sent = <int>[];
+      controller.attachExternalTransport(
+        writeBytes: (b) {
+          sent.addAll(b);
+          return true;
+        },
+      );
+
+      controller.setFocused(false); // mode off → nothing emitted yet
+      expect(sent, isEmpty);
+
+      controller.appendOutputBytes('\x1b[?1004h'.codeUnits); // enable → flush
+      expect(String.fromCharCodes(sent), '\x1b[O');
+
+      sent.clear();
+      controller.appendOutputBytes('x'.codeUnits); // no state change → no resend
+      expect(sent, isEmpty);
+    });
+
+    test('emits CSI I when focused after mode enabled', () {
+      final controller = GhosttyTerminalController();
+      final sent = <int>[];
+      controller.attachExternalTransport(
+        writeBytes: (b) {
+          sent.addAll(b);
+          return true;
+        },
+      );
+
+      controller.appendOutputBytes('\x1b[?1004h'.codeUnits);
+      controller.setFocused(true);
+      expect(String.fromCharCodes(sent), '\x1b[I');
+    });
+
+    test('re-asserts desired state after mode 1004 toggles off then on', () {
+      final controller = GhosttyTerminalController();
+      final sent = <int>[];
+      controller.attachExternalTransport(
+        writeBytes: (b) {
+          sent.addAll(b);
+          return true;
+        },
+      );
+
+      controller.setFocused(false);
+      controller.appendOutputBytes('\x1b[?1004h'.codeUnits); // → CSI O
+      sent.clear();
+      controller.appendOutputBytes('\x1b[?1004l'.codeUnits); // disable
+      controller.appendOutputBytes('\x1b[?1004h'.codeUnits); // re-enable → resend
+      expect(String.fromCharCodes(sent), '\x1b[O');
+    });
+
+    test('emits nothing while mode 1004 is never enabled', () {
+      final controller = GhosttyTerminalController();
+      final sent = <int>[];
+      controller.attachExternalTransport(
+        writeBytes: (b) {
+          sent.addAll(b);
+          return true;
+        },
+      );
+
+      controller.setFocused(true);
+      controller.appendOutputBytes('hello world'.codeUnits);
+      expect(sent, isEmpty);
+    });
+
+    test('does not latch when writeBytes fails, retries on next flush', () {
+      final controller = GhosttyTerminalController();
+      var accept = false;
+      final sent = <int>[];
+      controller.attachExternalTransport(
+        writeBytes: (b) {
+          if (!accept) return false;
+          sent.addAll(b);
+          return true;
+        },
+      );
+
+      controller.appendOutputBytes('\x1b[?1004h'.codeUnits);
+      controller.setFocused(true); // write rejected → not latched
+      expect(sent, isEmpty);
+
+      accept = true;
+      controller.appendOutputBytes(''.codeUnits); // flush retries → CSI I
+      expect(String.fromCharCodes(sent), '\x1b[I');
+    });
   });
 }
 

@@ -642,17 +642,14 @@ final class VtRgbColor {
   final int b;
 
   factory VtRgbColor.fromNative(bindings.GhosttyColorRgb native) {
-    final r = calloc<ffi.Uint8>();
-    final g = calloc<ffi.Uint8>();
-    final b = calloc<ffi.Uint8>();
-    try {
-      bindings.ghostty_color_rgb_get(native, r, g, b);
-      return VtRgbColor(r.value, g.value, b.value);
-    } finally {
-      calloc.free(r);
-      calloc.free(g);
-      calloc.free(b);
-    }
+    // Read the struct fields directly rather than via ghostty_color_rgb_get,
+    // which takes GhosttyColorRgb BY VALUE — Dart FFI mismarshals that 3×uint8
+    // struct on macOS/iOS arm64, so the callee sees a zeroed struct and writes
+    // back 0,0,0 (all terminal colors render black → invisible text). The
+    // struct is transparent (external r/g/b) and an ffi.Struct instance is
+    // always a view over native memory — it cannot be heap-constructed — so
+    // direct field reads are exact for every possible caller.
+    return VtRgbColor(native.r, native.g, native.b);
   }
 
   @override

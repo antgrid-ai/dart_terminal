@@ -25,6 +25,12 @@ export 'src/terminal_controller.dart';
 export 'src/terminal_snapshot.dart';
 export 'src/terminal_render_model.dart';
 
+/// Pre-built named ANSI palettes (Campbell, etc.) shared by hosts and tests.
+export 'src/palettes.dart';
+
+/// WCAG contrast ratio helpers and a minimum-contrast solver.
+export 'src/contrast.dart';
+
 /// Shared mutable selection state for terminal widgets.
 export 'src/terminal_selection_session.dart';
 

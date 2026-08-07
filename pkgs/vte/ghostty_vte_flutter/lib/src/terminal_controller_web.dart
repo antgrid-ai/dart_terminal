@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/painting.dart';
 import 'package:ghostty_vte/ghostty_vte.dart';
 
 import 'pty_session.dart';
@@ -99,6 +100,17 @@ class GhosttyTerminalController extends ChangeNotifier
 
   /// Web does not expose a native Ghostty render-state snapshot.
   GhosttyTerminalRenderSnapshot? get renderSnapshot => null;
+
+  /// No-op on web: the engine default-color render path is native-only.
+  ///
+  /// Mirrors the native controller's signature so [GhosttyTerminalView] can
+  /// push its color params unconditionally without a platform branch.
+  void applyEngineColors({
+    required List<Color> ansiPalette,
+    Color? foreground,
+    Color? background,
+    Color? cursor,
+  }) {}
 
   /// Current buffered terminal lines.
   List<String> get lines => List<String>.unmodifiable(_lines);
@@ -284,6 +296,15 @@ class GhosttyTerminalController extends ChangeNotifier
     _running = running;
     _markDirty();
   }
+
+  /// Web stub: focus reporting is a native-only concern (the web engine has no
+  /// external PTY transport). Present so the cross-platform controller surface
+  /// matches `terminal_controller_native.dart`.
+  void setFocused(bool focused) {}
+
+  /// Web stub for interface parity — the web controller does not track focus
+  /// intent (see [setFocused]).
+  bool get isFocused => false;
 
   /// Web keeps transport setup separate, so profile starts are a no-op wrapper.
   Future<GhosttyTerminalShellLaunch?> startShellProfile({

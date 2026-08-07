@@ -116,9 +116,18 @@ void main() {
         defaultForeground: defaultForeground,
         defaultBackground: defaultBackground,
       );
+      // SGR 2 (faint) halves the foreground toward black, opaque — matching
+      // Windows Terminal / xterm — not an alpha-transparency change.
       expect(
         faint.foreground,
-        equals(const Color.fromRGBO(255, 120, 40, 0.72)),
+        equals(
+          const Color.from(
+            alpha: 1.0,
+            red: 255 / 255 * 0.5,
+            green: 120 / 255 * 0.5,
+            blue: 40 / 255 * 0.5,
+          ),
+        ),
       );
 
       final invisible = GhosttyTerminalResolvedStyle.fromNativeStyle(
@@ -142,6 +151,48 @@ void main() {
       );
       expect(invisible.foreground, equals(defaultBackground));
       expect(invisible.background, equals(Colors.transparent));
+    });
+
+    test('faint applies to the default foreground, not the transparent sentinel', () {
+      // Regression guard for the ordering bug: faint used to run BEFORE the
+      // transparent-foreground fallback. Because the sentinel is
+      // Color(0x00000000), reducing its alpha produced 0xB8000000 — which no
+      // longer compares equal to transparent, so the default-foreground
+      // fallback was skipped and dim default text rendered as translucent
+      // black instead of a dimmed default colour.
+      final faintDefault = GhosttyTerminalResolvedStyle.fromNativeStyle(
+        style: const VtStyle(
+          foreground: VtStyleColor.none(),
+          background: VtStyleColor.none(),
+          underlineColor: VtStyleColor.none(),
+          bold: false,
+          italic: false,
+          faint: true,
+          blink: false,
+          inverse: false,
+          invisible: false,
+          strikethrough: false,
+          overline: false,
+          underline: GhosttySgrUnderline.GHOSTTY_SGR_UNDERLINE_NONE,
+        ),
+        palette: palette,
+        defaultForeground: defaultForeground,
+        defaultBackground: defaultBackground,
+      );
+
+      expect(
+        faintDefault.foreground,
+        equals(
+          Color.from(
+            alpha: 1.0,
+            red: defaultForeground.r * 0.5,
+            green: defaultForeground.g * 0.5,
+            blue: defaultForeground.b * 0.5,
+          ),
+        ),
+      );
+      // Specifically: fully opaque, and not the old translucent-black result.
+      expect(faintDefault.foreground.a, equals(1.0));
     });
 
     test('formatter and native style resolution stay aligned', () {

@@ -6,6 +6,7 @@ import 'package:flutter/painting.dart';
 import 'package:ghostty_vte/ghostty_vte.dart';
 
 import 'terminal_surface_contract.dart';
+import 'xterm_palette_math.dart';
 
 /// Snapshot of styled terminal output suitable for custom painting.
 @immutable
@@ -770,6 +771,12 @@ final class GhosttyTerminalStyle {
 /// ANSI palette and 256-color resolver used by [GhosttyTerminalView].
 @immutable
 final class GhosttyTerminalPalette {
+  /// [ansi] must contain exactly 16 ANSI colors: both the formatter resolver
+  /// ([resolve]) and the engine `renderState` path
+  /// (`expandAnsiToEnginePalette`) depend on it. This can't be asserted in
+  /// this `const` constructor (`List.length` isn't const-evaluable), so it is
+  /// enforced at point of use — see [GhosttyTerminalView] (debug assert) and
+  /// `expandAnsiToEnginePalette` (runtime throw).
   const GhosttyTerminalPalette({required this.ansi});
 
   /// XTerm-compatible default terminal colors.
@@ -808,17 +815,9 @@ final class GhosttyTerminalPalette {
     if (index >= 0 && index < ansi.length) {
       return ansi[index];
     }
-    if (index >= 16 && index <= 231) {
-      final cubeIndex = index - 16;
-      const levels = <int>[0, 95, 135, 175, 215, 255];
-      final red = levels[(cubeIndex ~/ 36) % 6];
-      final green = levels[(cubeIndex ~/ 6) % 6];
-      final blue = levels[cubeIndex % 6];
+    if (index >= 16 && index <= 255) {
+      final (red, green, blue) = xtermIndexedRgb(index);
       return Color.fromARGB(0xFF, red, green, blue);
-    }
-    if (index >= 232 && index <= 255) {
-      final value = 8 + (index - 232) * 10;
-      return Color.fromARGB(0xFF, value, value, value);
     }
     return fallback;
   }

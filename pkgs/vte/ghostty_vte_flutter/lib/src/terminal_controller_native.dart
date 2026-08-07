@@ -1,11 +1,13 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/painting.dart';
 import 'package:ghostty_vte/ghostty_vte.dart';
 
+import 'engine_palette.dart';
 import 'pty_session.dart';
 import 'shell_launch.dart';
 import 'terminal_render_model.dart';
@@ -86,6 +88,28 @@ class GhosttyTerminalController extends ChangeNotifier
   int _cellWidthPx = 0;
   int _cellHeightPx = 0;
 
+  List<Color>? _engineAnsiPalette;
+  Color? _engineForeground;
+  Color? _engineBackground;
+  Color? _engineCursor;
+
+  /// Whether the engine viewport is tracking the live bottom of the transcript.
+  ///
+  /// While true, newly ingested output keeps the viewport pinned to the bottom
+  /// (the live tail). When the user scrolls up into scrollback this flips to
+  /// false so incoming output no longer yanks the view to the bottom; returning
+  /// to the bottom flips it back to true.
+  bool _viewportFollowingBottom = true;
+
+  /// Desired DEC-1004 focus state requested by the host, or null if the host
+  /// has never reported focus (so we must not assert anything).
+  bool? _desiredFocus;
+
+  /// Last focus value actually emitted while mode 1004 was enabled. Reset to
+  /// null whenever 1004 is disabled, so the desired state is re-asserted on the
+  /// next enable.
+  bool? _sentFocus;
+
   /// Monotonic value that increments whenever buffered output/state changes.
   @override
   int get revision => _revision;
@@ -109,17 +133,171 @@ class GhosttyTerminalController extends ChangeNotifier
   /// Live VT terminal state backing this controller.
   VtTerminal get terminal => _ensureTerminal();
 
+  /// Configures the engine's default colors so the native `renderState` render
+  /// path resolves ANSI/256 colors against [ansiPalette] (16 colors) instead of
+  /// the engine's built-in theme. Stored and re-applied after [clear].
+  void applyEngineColors({
+    required List<Color> ansiPalette,
+    Color? foreground,
+    Color? background,
+    Color? cursor,
+  }) {
+    // Idempotent: a no-op when nothing changed avoids a redundant palette
+    // push + full snapshot rebuild on rebuilds that re-forward identical
+    // colors (e.g. the startup initState/byte-arrival ordering).
+    if (_engineAnsiPalette != null &&
+        listEquals(_engineAnsiPalette, ansiPalette) &&
+        _engineForeground == foreground &&
+        _engineBackground == background &&
+        _engineCursor == cursor) {
+      return;
+    }
+    _engineAnsiPalette = List<Color>.unmodifiable(ansiPalette);
+    _engineForeground = foreground;
+    _engineBackground = background;
+    _engineCursor = cursor;
+    _applyEngineColors();
+  }
+
+  void _applyEngineColors() {
+    final terminal = _terminal;
+    if (terminal == null) {
+      return;
+    }
+    _pushColorsTo(terminal);
+    _refreshSnapshot();
+  }
+
+  /// Pushes the currently stored engine color state to [terminal].
+  /// Does NOT call [_ensureTerminal] (no recursion risk) and does NOT
+  /// call [_refreshSnapshot] — callers own that.
+  void _pushColorsTo(VtTerminal terminal) {
+    final ansi = _engineAnsiPalette;
+    if (ansi == null) {
+      return;
+    }
+    terminal.defaultPalette = expandAnsiToEnginePalette(ansi);
+    if (_engineForeground != null) {
+      terminal.defaultForegroundColor = colorToVtRgb(_engineForeground!);
+    }
+    if (_engineBackground != null) {
+      terminal.defaultBackgroundColor = colorToVtRgb(_engineBackground!);
+    }
+    if (_engineCursor != null) {
+      terminal.defaultCursorColor = colorToVtRgb(_engineCursor!);
+    }
+  }
+
   /// Current formatted plain-text terminal snapshot.
   String get plainText => _plainText;
 
   /// Current styled terminal snapshot used by [GhosttyTerminalView].
   GhosttyTerminalSnapshot get snapshot => _snapshot;
 
-  /// Native Ghostty render-state snapshot for the live visible viewport.
+  /// Native Ghostty render-state snapshot for the current visible viewport.
   ///
-  /// This is only available on native platforms and only reflects the current
-  /// visible viewport, not formatter-derived scrollback transcript state.
+  /// This is only available on native platforms. The viewport it reflects moves
+  /// through scrollback as the [scrollViewportByRows]/[scrollViewportToTop]/
+  /// [scrollViewportToBottom] methods drive the engine, so unlike the
+  /// formatter path this snapshot can represent scrollback rows directly.
   GhosttyTerminalRenderSnapshot? get renderSnapshot => _renderSnapshot;
+
+  /// Whether the engine viewport is currently anchored to the live bottom.
+  ///
+  /// True means new output follows to the tail; false means the user has
+  /// scrolled up into scrollback and the viewport is held in history.
+  bool get isViewportAtBottom => _viewportFollowingBottom;
+
+  /// Current engine scroll geometry in rows: `total` rows in the scrollable
+  /// area, `offset` of the viewport top into that area, and visible `length`.
+  ///
+  /// Returns null before the terminal is created. This is the engine-native
+  /// source of truth the view layer should use for scrollbar sizing and for
+  /// mapping a viewport row to an absolute transcript row
+  /// (`absoluteRow = offset + viewportRowIndex`).
+  VtTerminalScrollbar? get viewportScrollbar => _terminal?.scrollbar;
+
+  /// Scrolls the engine viewport by [deltaRows] within the scrollback.
+  ///
+  /// Positive [deltaRows] moves *up* into history (older content), negative
+  /// moves *down* toward the live bottom — matching the view layer's
+  /// offset-from-bottom convention (wheel-up = positive).
+  void scrollViewportByRows(int deltaRows) {
+    if (deltaRows == 0) {
+      return;
+    }
+    final terminal = _terminal;
+    if (terminal == null) {
+      return;
+    }
+    // Engine convention: negative delta moves up into history, so negate.
+    terminal.scrollBy(-deltaRows);
+    _syncFollowingFromScrollbar(terminal);
+    _refreshRenderStateOnly();
+    _markDirty();
+  }
+
+  /// Scrolls the engine viewport to the very top of the scrollback.
+  void scrollViewportToTop() {
+    final terminal = _terminal;
+    if (terminal == null) {
+      // No terminal yet: the top is not the bottom, so clear follow so the
+      // first output after creation honors this intent instead of pinning.
+      _viewportFollowingBottom = false;
+      return;
+    }
+    terminal.scrollToTop();
+    _syncFollowingFromScrollbar(terminal);
+    _refreshRenderStateOnly();
+    _markDirty();
+  }
+
+  /// Scrolls the engine viewport back to the live bottom and re-pins follow.
+  void scrollViewportToBottom() {
+    final terminal = _terminal;
+    if (terminal == null) {
+      _viewportFollowingBottom = true;
+      return;
+    }
+    terminal.scrollToBottom();
+    _viewportFollowingBottom = true;
+    _refreshRenderStateOnly();
+    _markDirty();
+  }
+
+  /// Scrolls so the viewport's top sits [rowsFromBottom] rows above the live
+  /// bottom (0 == bottom). Clamps to the available scrollback. The view layer's
+  /// primary entry point: it owns the offset→engine-delta sign math.
+  void scrollViewportToOffsetFromBottom(int rowsFromBottom) {
+    final terminal = _terminal;
+    if (terminal == null) {
+      // No terminal yet: still record the requested follow target so the first
+      // output after creation honors this offset rather than stale follow state.
+      _viewportFollowingBottom = rowsFromBottom <= 0;
+      return;
+    }
+    final bar = terminal.scrollbar;
+    final maxFromBottom = math.max(0, bar.total - bar.length);
+    final target = rowsFromBottom.clamp(0, maxFromBottom);
+    final currentFromBottom = bar.total - bar.length - bar.offset;
+    final delta = target - currentFromBottom;
+    if (delta != 0) {
+      // Engine convention: negative delta moves up into history; `delta`
+      // positive means move further from the bottom (up), so negate.
+      terminal.scrollBy(-delta);
+    }
+    _viewportFollowingBottom = target == 0;
+    _refreshRenderStateOnly();
+    _markDirty();
+  }
+
+  /// Recomputes [_viewportFollowingBottom] from the engine scrollbar after a
+  /// manual scroll. The viewport is "at bottom" when its bottom edge
+  /// (`offset + length`) reaches the total scrollable height.
+  void _syncFollowingFromScrollbar(VtTerminal terminal) {
+    final bar = terminal.scrollbar;
+    _viewportFollowingBottom = bar.offset + bar.length >= bar.total;
+  }
 
   /// Most recent shell launch metadata associated with this controller.
   GhosttyTerminalShellLaunch? get activeShellLaunch => _activeShellLaunch;
@@ -211,6 +389,10 @@ class GhosttyTerminalController extends ChangeNotifier
     final unwrapFormatter = terminal.createFormatter(
       const VtFormatterTerminalOptions(unwrap: true),
     );
+    // Push engine colors before publishing `_terminal` so a malformed stored
+    // palette throws here — while the controller is still fully unpublished —
+    // rather than leaving a half-initialized `_terminal` behind.
+    _pushColorsTo(terminal);
     _terminal = terminal;
     _plainFormatter = formatter;
     _styledFormatter = styledFormatter;
@@ -369,6 +551,48 @@ class GhosttyTerminalController extends ChangeNotifier
     _ingestBytes(bytes);
   }
 
+  /// Reports a terminal focus change to the running program. Encodes a
+  /// DEC-1004 focus event (CSI I / CSI O) and writes it to the active
+  /// transport, but only when the program has enabled focus reporting
+  /// (mode 1004). The desired state is latched and re-asserted by
+  /// [_flushFocusReport] once 1004 becomes enabled. Mirrors upstream Ghostty
+  /// `Termio.focusCallback`.
+  void setFocused(bool focused) {
+    _desiredFocus = focused;
+    _flushFocusReport();
+  }
+
+  /// The host's current focus intent for this terminal, as last set via
+  /// [setFocused] (false before any call). This is purely the host-side "is the
+  /// user viewing this terminal" bit — independent of whether the guest program
+  /// has enabled DEC-1004 reporting. Consumers gate view-scoped effects (e.g.
+  /// an audible bell) on it.
+  bool get isFocused => _desiredFocus ?? false;
+
+  void _flushFocusReport() {
+    final terminal = _terminal;
+    final desired = _desiredFocus;
+    if (terminal == null || desired == null) return;
+    bool enabled;
+    try {
+      enabled = terminal.getMode(VtModes.focusEvent);
+    } catch (_) {
+      return;
+    }
+    if (!enabled) {
+      _sentFocus = null; // re-assert on next enable
+      return;
+    }
+    if (_sentFocus == desired) return;
+    final bytes = GhosttyVt.encodeFocus(
+      desired
+          ? GhosttyFocusEvent.GHOSTTY_FOCUS_GAINED
+          : GhosttyFocusEvent.GHOSTTY_FOCUS_LOST,
+    );
+    if (bytes.isEmpty) return;
+    if (writeBytes(bytes)) _sentFocus = desired;
+  }
+
   /// Update the running state for an external transport session.
   void setSessionRunning(bool running) {
     _running = running;
@@ -445,7 +669,9 @@ class GhosttyTerminalController extends ChangeNotifier
     }
 
     terminal.reset();
-    _refreshSnapshot();
+    _viewportFollowingBottom = true;
+    // reset() restores the engine's built-in theme, so re-push the host colors.
+    _applyEngineColors();
     _markDirty();
   }
 
@@ -671,8 +897,19 @@ class GhosttyTerminalController extends ChangeNotifier
       return;
     }
 
-    _ensureTerminal().writeBytes(bytes);
+    final terminal = _ensureTerminal();
+    terminal.writeBytes(bytes);
+    // Keep the viewport pinned to the live tail while following the bottom, so
+    // new output stays visible. When the user has scrolled up into scrollback
+    // (_viewportFollowingBottom == false) the viewport is left where it is.
+    if (_viewportFollowingBottom) {
+      terminal.scrollToBottom();
+    }
     _refreshSnapshot();
+    // Ingested output is what flips DEC mode 1004, so re-assert the latched
+    // focus state here — this covers every ingest path (PTY, external
+    // transport, and injected debug output) rather than just one of them.
+    _flushFocusReport();
     _markDirty();
   }
 
@@ -713,7 +950,8 @@ class GhosttyTerminalController extends ChangeNotifier
     //
     // The unwrapped text is computed here once and passed in so that
     // _computeWrappedRows does not need to call formatText() itself, keeping
-    // _refreshSnapshot to exactly two formatter passes (plain + styled).
+    // _refreshSnapshot to exactly three formatter passes (plain + unwrapped +
+    // styled).
     final unwrappedText = _unwrapFormatter?.formatText();
     final wrappedRows = _computeWrappedRows(parts, unwrappedText);
 
@@ -722,6 +960,23 @@ class GhosttyTerminalController extends ChangeNotifier
       maxLines: maxLines,
       wrappedRows: wrappedRows,
     );
+    renderState.update();
+    _renderSnapshot = _toRenderSnapshot(renderState.snapshot());
+  }
+
+  /// Refreshes ONLY the engine render-state snapshot for the current viewport.
+  ///
+  /// A pure scroll moves the engine viewport but changes no transcript content,
+  /// so the formatter-derived fields (`_plainText`, `_lines`, `_snapshot`) are
+  /// scroll-invariant and need not be recomputed. This skips the three
+  /// full-buffer formatter passes that [_refreshSnapshot] runs, leaving only the
+  /// engine render-state update on the scroll hot path.
+  void _refreshRenderStateOnly() {
+    final renderState = _renderState;
+    if (renderState == null) {
+      _renderSnapshot = null;
+      return;
+    }
     renderState.update();
     _renderSnapshot = _toRenderSnapshot(renderState.snapshot());
   }

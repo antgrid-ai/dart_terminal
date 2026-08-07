@@ -3,6 +3,21 @@ import 'package:flutter/painting.dart';
 import 'package:ghostty_vte/ghostty_vte.dart';
 import 'terminal_snapshot.dart';
 
+/// Applies the SGR 2 "faint/dim" attribute by blending the foreground toward
+/// opaque black at 50%, matching Windows Terminal (which blends faint with
+/// black — see microsoft/terminal#16493) and the classic xterm convention of
+/// halving the foreground intensity. e.g. Campbell's default #CCCCCC → #666666.
+///
+/// Note: this is an *opaque* RGB reduction, not an alpha/transparency change —
+/// alpha compositing over a dark background produced a washed-out result
+/// (#CCCCCC at 0.72 over near-black ≈ #959595) that didn't match real terminals.
+Color _applyFaint(Color foreground) => Color.from(
+  alpha: foreground.a,
+  red: foreground.r * 0.5,
+  green: foreground.g * 0.5,
+  blue: foreground.b * 0.5,
+);
+
 /// Resolved cell style derived from Ghostty render-state data.
 @immutable
 final class GhosttyTerminalResolvedStyle {
@@ -116,11 +131,13 @@ final class GhosttyTerminalResolvedStyle {
     if (style.invisible) {
       foreground = background == transparent ? defaultBackground : background;
     }
-    if (style.faint) {
-      foreground = foreground.withValues(alpha: 0.72);
-    }
     if (foreground == transparent) {
       foreground = defaultForeground;
+    }
+    // Faint runs last, after the default foreground is resolved, so dim text
+    // on the default foreground is halved rather than skipped while transparent.
+    if (style.faint) {
+      foreground = _applyFaint(foreground);
     }
 
     return GhosttyTerminalResolvedStyle(
@@ -215,11 +232,13 @@ final class GhosttyTerminalResolvedStyle {
     if (style.invisible) {
       foreground = background == transparent ? defaultBackground : background;
     }
-    if (style.faint) {
-      foreground = foreground.withValues(alpha: 0.72);
-    }
     if (foreground == transparent) {
       foreground = defaultForeground;
+    }
+    // Faint runs last, after the default foreground is resolved, so dim text
+    // on the default foreground is halved rather than skipped while transparent.
+    if (style.faint) {
+      foreground = _applyFaint(foreground);
     }
 
     return GhosttyTerminalResolvedStyle(
@@ -290,11 +309,13 @@ final class GhosttyTerminalResolvedStyle {
           ? toColor(colors.background)
           : background;
     }
-    if (style.faint) {
-      foreground = foreground.withValues(alpha: 0.72);
-    }
     if (foreground == transparent) {
       foreground = toColor(colors.foreground);
+    }
+    // Faint runs last (after the default foreground is resolved) so dim text
+    // on the default foreground is halved toward black rather than skipped.
+    if (style.faint) {
+      foreground = _applyFaint(foreground);
     }
 
     return GhosttyTerminalResolvedStyle(

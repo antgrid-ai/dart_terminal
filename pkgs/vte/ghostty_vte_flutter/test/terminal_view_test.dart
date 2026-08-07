@@ -7,7 +7,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ghostty_vte_flutter/ghostty_vte_flutter.dart';
 
-final bool _hasNativeTerminal = _hasNativeTerminalSupport();
+import 'support/native_terminal.dart';
 
 /// Measured rendering metrics derived at runtime from the same [TextStyle]
 /// that [buildView] uses (`fontSize: 14, lineHeight: 1.35, fontFamily:
@@ -38,16 +38,6 @@ _TestMetrics _measureTestMetrics() {
   painter.dispose();
   const padding = 12; // matches the EdgeInsets.all(12) default in buildView()
   return (charWidth: charWidth, linePixels: linePixels, padding: padding);
-}
-
-bool _hasNativeTerminalSupport() {
-  try {
-    final terminal = GhosttyVt.newTerminal(cols: 80, rows: 24);
-    terminal.close();
-    return true;
-  } catch (_) {
-    return false;
-  }
 }
 
 void main() {
@@ -169,7 +159,7 @@ void main() {
     });
 
     testWidgets('renders VT-backed controller output', (tester) async {
-      if (!_hasNativeTerminal) {
+      if (!hasNativeTerminal) {
         return;
       }
 
@@ -184,7 +174,7 @@ void main() {
     testWidgets('exposes native render-state data while the view renders', (
       tester,
     ) async {
-      if (!_hasNativeTerminal) {
+      if (!hasNativeTerminal) {
         return;
       }
 
@@ -203,7 +193,7 @@ void main() {
     testWidgets(
       'keeps painted color output consistent across formatter and renderState',
       (tester) async {
-        if (!_hasNativeTerminal) {
+        if (!hasNativeTerminal) {
           return;
         }
 
@@ -236,7 +226,7 @@ void main() {
     testWidgets(
       'formatter and renderState paint comparable colored pixel coverage',
       (tester) async {
-        if (!_hasNativeTerminal) {
+        if (!hasNativeTerminal) {
           return;
         }
 
@@ -299,7 +289,7 @@ void main() {
     testWidgets(
       'renderState honors widget default background and foreground colors',
       (tester) async {
-        if (!_hasNativeTerminal) {
+        if (!hasNativeTerminal) {
           return;
         }
 
@@ -343,7 +333,7 @@ void main() {
     testWidgets(
       'renderState keeps explicit native default colors distinct from widget defaults',
       (tester) async {
-        if (!_hasNativeTerminal) {
+        if (!hasNativeTerminal) {
           return;
         }
 
@@ -421,7 +411,7 @@ void main() {
     );
 
     testWidgets('renderState honors widget cursor color', (tester) async {
-      if (!_hasNativeTerminal) {
+      if (!hasNativeTerminal) {
         return;
       }
 
@@ -465,7 +455,7 @@ void main() {
     testWidgets('formatter prefers the native cursor position when available', (
       tester,
     ) async {
-      if (!_hasNativeTerminal) {
+      if (!hasNativeTerminal) {
         return;
       }
 
@@ -509,7 +499,7 @@ void main() {
     testWidgets('renderState wide-tail cursor covers the full wide cell', (
       tester,
     ) async {
-      if (!_hasNativeTerminal) {
+      if (!hasNativeTerminal) {
         return;
       }
 
@@ -574,7 +564,7 @@ void main() {
     testWidgets('renderState underline cursor paints on the bottom row edge', (
       tester,
     ) async {
-      if (!_hasNativeTerminal) {
+      if (!hasNativeTerminal) {
         return;
       }
 
@@ -621,7 +611,7 @@ void main() {
     testWidgets('renderState bar cursor stays on the leading cell edge', (
       tester,
     ) async {
-      if (!_hasNativeTerminal) {
+      if (!hasNativeTerminal) {
         return;
       }
 
@@ -677,7 +667,7 @@ void main() {
     });
 
     testWidgets('renderState honors widget hyperlink color', (tester) async {
-      if (!_hasNativeTerminal) {
+      if (!hasNativeTerminal) {
         return;
       }
 
@@ -711,7 +701,7 @@ void main() {
     testWidgets('scrollback does not paint the snapshot cursor', (
       tester,
     ) async {
-      if (!_hasNativeTerminal) {
+      if (!hasNativeTerminal) {
         return;
       }
 
@@ -756,7 +746,7 @@ void main() {
     });
 
     testWidgets('renderState honors widget selection color', (tester) async {
-      if (!_hasNativeTerminal) {
+      if (!hasNativeTerminal) {
         return;
       }
 
@@ -797,7 +787,7 @@ void main() {
     testWidgets(
       'renderState selection remains visible over explicit native backgrounds',
       (tester) async {
-        if (!_hasNativeTerminal) {
+        if (!hasNativeTerminal) {
           return;
         }
 
@@ -839,7 +829,7 @@ void main() {
     testWidgets(
       'formatter and renderState paint comparable mixed-width pixel coverage',
       (tester) async {
-        if (!_hasNativeTerminal) {
+        if (!hasNativeTerminal) {
           return;
         }
 
@@ -869,7 +859,7 @@ void main() {
     testWidgets(
       'formatter and renderState paint comparable inverse and blue background coverage',
       (tester) async {
-        if (!_hasNativeTerminal) {
+        if (!hasNativeTerminal) {
           return;
         }
 
@@ -906,7 +896,7 @@ void main() {
     testWidgets('box drawing borders paint as continuous strokes', (
       tester,
     ) async {
-      if (!_hasNativeTerminal) {
+      if (!hasNativeTerminal) {
         return;
       }
 
@@ -963,7 +953,7 @@ void main() {
     testWidgets('single-cell circle glyphs keep spacing inside the cell', (
       tester,
     ) async {
-      if (!_hasNativeTerminal) {
+      if (!hasNativeTerminal) {
         return;
       }
 
@@ -1004,7 +994,7 @@ void main() {
     testWidgets('rounded box corners paint into the expected quadrants', (
       tester,
     ) async {
-      if (!_hasNativeTerminal) {
+      if (!hasNativeTerminal) {
         return;
       }
 
@@ -1072,7 +1062,7 @@ void main() {
     testWidgets('renderState paints common tui symbols with visible coverage', (
       tester,
     ) async {
-      if (!_hasNativeTerminal) {
+      if (!hasNativeTerminal) {
         return;
       }
 
@@ -1101,7 +1091,7 @@ void main() {
     testWidgets(
       'renderState paints btop braille and symbol glyphs with visible coverage',
       (tester) async {
-        if (!_hasNativeTerminal) {
+        if (!hasNativeTerminal) {
           return;
         }
 
@@ -1131,7 +1121,7 @@ void main() {
     testWidgets(
       'renderState preserves explicit blank cells between separated glyphs',
       (tester) async {
-        if (!_hasNativeTerminal) {
+        if (!hasNativeTerminal) {
           return;
         }
 
@@ -1229,7 +1219,7 @@ void main() {
     testWidgets('renderState preserves wide glyph advance before later cells', (
       tester,
     ) async {
-      if (!_hasNativeTerminal) {
+      if (!hasNativeTerminal) {
         return;
       }
 
@@ -1318,7 +1308,7 @@ void main() {
     testWidgets(
       'formatter and renderState paint comparable underline coverage',
       (tester) async {
-        if (!_hasNativeTerminal) {
+        if (!hasNativeTerminal) {
           return;
         }
 
@@ -1391,7 +1381,7 @@ void main() {
     testWidgets(
       'formatter and renderState paint comparable selection coverage over custom glyphs',
       (tester) async {
-        if (!_hasNativeTerminal) {
+        if (!hasNativeTerminal) {
           return;
         }
 
@@ -1449,7 +1439,7 @@ void main() {
     );
 
     testWidgets('updates when controller notifies', (tester) async {
-      if (!_hasNativeTerminal) {
+      if (!hasNativeTerminal) {
         return;
       }
 
@@ -1548,7 +1538,7 @@ void main() {
     });
 
     testWidgets('switches controllers correctly', (tester) async {
-      if (!_hasNativeTerminal) {
+      if (!hasNativeTerminal) {
         return;
       }
 
@@ -1635,7 +1625,7 @@ void main() {
     });
 
     testWidgets('handles many lines without overflow', (tester) async {
-      if (!_hasNativeTerminal) {
+      if (!hasNativeTerminal) {
         return;
       }
 
@@ -1653,7 +1643,7 @@ void main() {
     testWidgets('vertical scrollbar drag updates the visible transcript', (
       tester,
     ) async {
-      if (!_hasNativeTerminal) {
+      if (!hasNativeTerminal) {
         return;
       }
 
@@ -1701,7 +1691,7 @@ void main() {
     testWidgets(
       'ancestor NotificationListener receives terminal scroll notifications',
       (tester) async {
-        if (!_hasNativeTerminal) {
+        if (!hasNativeTerminal) {
           return;
         }
 
@@ -1746,7 +1736,7 @@ void main() {
     testWidgets('external ScrollController drives transcript scrolling', (
       tester,
     ) async {
-      if (!_hasNativeTerminal) {
+      if (!hasNativeTerminal) {
         return;
       }
 
@@ -1793,7 +1783,7 @@ void main() {
     testWidgets(
       'new terminal activity snaps the viewport back to the live bottom when enabled',
       (tester) async {
-        if (!_hasNativeTerminal) {
+        if (!hasNativeTerminal) {
           return;
         }
 
@@ -1867,7 +1857,7 @@ void main() {
     testWidgets(
       'new terminal activity does not move the viewport when auto follow is disabled',
       (tester) async {
-        if (!_hasNativeTerminal) {
+        if (!hasNativeTerminal) {
           return;
         }
 
@@ -1931,7 +1921,7 @@ void main() {
     testWidgets(
       'keyboard input jumps back to the live bottom even when auto follow is disabled',
       (tester) async {
-        if (!_hasNativeTerminal) {
+        if (!hasNativeTerminal) {
           return;
         }
 
@@ -1991,7 +1981,7 @@ void main() {
     );
 
     testWidgets('handles empty lines and explicit line starts', (tester) async {
-      if (!_hasNativeTerminal) {
+      if (!hasNativeTerminal) {
         return;
       }
 
@@ -2006,7 +1996,7 @@ void main() {
     testWidgets('select-all and escape expose selection callbacks', (
       tester,
     ) async {
-      if (!_hasNativeTerminal) {
+      if (!hasNativeTerminal) {
         return;
       }
 
@@ -2043,7 +2033,7 @@ void main() {
     });
 
     testWidgets('double click selects the whole word', (tester) async {
-      if (!_hasNativeTerminal) {
+      if (!hasNativeTerminal) {
         return;
       }
 
@@ -2072,7 +2062,7 @@ void main() {
     testWidgets(
       'single tap after word selection clears instead of selecting a cell',
       (tester) async {
-        if (!_hasNativeTerminal) {
+        if (!hasNativeTerminal) {
           return;
         }
 
@@ -2112,7 +2102,7 @@ void main() {
     testWidgets(
       'renderState double click selects words on wrapped visible rows',
       (tester) async {
-        if (!_hasNativeTerminal) {
+        if (!hasNativeTerminal) {
           return;
         }
 
@@ -2156,7 +2146,7 @@ void main() {
     testWidgets('renderState taps open visible URLs on wrapped rows', (
       tester,
     ) async {
-      if (!_hasNativeTerminal) {
+      if (!hasNativeTerminal) {
         return;
       }
 
@@ -2198,7 +2188,7 @@ void main() {
     testWidgets(
       'renderState double click selects wrapped URLs across visible rows',
       (tester) async {
-        if (!_hasNativeTerminal) {
+        if (!hasNativeTerminal) {
           return;
         }
 
@@ -2244,7 +2234,7 @@ void main() {
     testWidgets(
       'renderState triple click selects the full wrapped logical line',
       (tester) async {
-        if (!_hasNativeTerminal) {
+        if (!hasNativeTerminal) {
           return;
         }
 
@@ -2292,7 +2282,7 @@ void main() {
     );
 
     testWidgets('triple click selects the whole line', (tester) async {
-      if (!_hasNativeTerminal) {
+      if (!hasNativeTerminal) {
         return;
       }
 
@@ -2324,7 +2314,7 @@ void main() {
     });
 
     testWidgets('double click drag expands selection by words', (tester) async {
-      if (!_hasNativeTerminal) {
+      if (!hasNativeTerminal) {
         return;
       }
 
@@ -2363,7 +2353,7 @@ void main() {
     testWidgets(
       'double click drag keeps word granularity across multiple moves',
       (tester) async {
-        if (!_hasNativeTerminal) {
+        if (!hasNativeTerminal) {
           return;
         }
 
@@ -2404,7 +2394,7 @@ void main() {
     );
 
     testWidgets('triple click drag expands selection by lines', (tester) async {
-      if (!_hasNativeTerminal) {
+      if (!hasNativeTerminal) {
         return;
       }
 
@@ -2445,7 +2435,7 @@ void main() {
     testWidgets(
       'triple click drag keeps line granularity across multiple moves',
       (tester) async {
-        if (!_hasNativeTerminal) {
+        if (!hasNativeTerminal) {
           return;
         }
 
@@ -2490,7 +2480,7 @@ void main() {
     );
 
     testWidgets('shift click extends the existing selection', (tester) async {
-      if (!_hasNativeTerminal) {
+      if (!hasNativeTerminal) {
         return;
       }
 
@@ -2657,7 +2647,7 @@ void main() {
     testWidgets('renderState selection content joins wrapped visible rows', (
       tester,
     ) async {
-      if (!_hasNativeTerminal) {
+      if (!hasNativeTerminal) {
         return;
       }
 
@@ -2829,7 +2819,7 @@ void main() {
     testWidgets('touch drag scrolls transcript without selecting text', (
       tester,
     ) async {
-      if (!_hasNativeTerminal) {
+      if (!hasNativeTerminal) {
         return;
       }
 
@@ -2873,7 +2863,7 @@ void main() {
     });
 
     testWidgets('touch long press starts terminal selection', (tester) async {
-      if (!_hasNativeTerminal) {
+      if (!hasNativeTerminal) {
         return;
       }
 
@@ -2907,7 +2897,7 @@ void main() {
     testWidgets('touch selection shows an adaptive context menu', (
       tester,
     ) async {
-      if (!_hasNativeTerminal) {
+      if (!hasNativeTerminal) {
         return;
       }
 
@@ -2949,7 +2939,7 @@ void main() {
     testWidgets('touch selection context menu supports custom actions', (
       tester,
     ) async {
-      if (!_hasNativeTerminal) {
+      if (!hasNativeTerminal) {
         return;
       }
 
@@ -3002,7 +2992,7 @@ void main() {
     });
 
     testWidgets('controller swap clears touch selection state', (tester) async {
-      if (!_hasNativeTerminal) {
+      if (!hasNativeTerminal) {
         return;
       }
 
@@ -3049,7 +3039,7 @@ void main() {
     testWidgets('touch selection handles can extend the highlight', (
       tester,
     ) async {
-      if (!_hasNativeTerminal) {
+      if (!hasNativeTerminal) {
         return;
       }
 
@@ -3108,7 +3098,7 @@ void main() {
     testWidgets('touch selection handles auto-pan near the viewport edge', (
       tester,
     ) async {
-      if (!_hasNativeTerminal) {
+      if (!hasNativeTerminal) {
         return;
       }
 
@@ -3169,7 +3159,7 @@ void main() {
     testWidgets(
       'touch long press at live bottom does not expand to the viewport',
       (tester) async {
-        if (!_hasNativeTerminal) {
+        if (!hasNativeTerminal) {
           return;
         }
 
@@ -3230,7 +3220,7 @@ void main() {
     testWidgets(
       'touch input in auto mode does not forward terminal mouse events',
       (tester) async {
-        if (!_hasNativeTerminal) {
+        if (!hasNativeTerminal) {
           return;
         }
 
@@ -3272,7 +3262,7 @@ void main() {
     testWidgets(
       'pointer interaction forwards Ghostty mouse events when reporting is enabled',
       (tester) async {
-        if (!_hasNativeTerminal) {
+        if (!hasNativeTerminal) {
           return;
         }
 
@@ -3338,7 +3328,7 @@ void main() {
     testWidgets(
       'scroll wheel forwards Ghostty mouse buttons four and five when reporting is enabled',
       (tester) async {
-        if (!_hasNativeTerminal) {
+        if (!hasNativeTerminal) {
           return;
         }
 
@@ -3406,7 +3396,7 @@ void main() {
     testWidgets(
       'selectionFirst policy keeps selection active even when terminal mouse reporting is enabled',
       (tester) async {
-        if (!_hasNativeTerminal) {
+        if (!hasNativeTerminal) {
           return;
         }
 
@@ -3544,7 +3534,7 @@ void main() {
     testWidgets('shifted underscore and plus are written as printable text', (
       tester,
     ) async {
-      if (!_hasNativeTerminal) {
+      if (!hasNativeTerminal) {
         return;
       }
 
@@ -3589,7 +3579,7 @@ void main() {
     testWidgets(
       'backspace in the terminal area erases and the next key overwrites it',
       (tester) async {
-        if (!_hasNativeTerminal) {
+        if (!hasNativeTerminal) {
           return;
         }
 
@@ -3655,7 +3645,7 @@ void main() {
     });
 
     test('appendDebugOutput increments revision and creates VT state', () {
-      if (!_hasNativeTerminal) {
+      if (!hasNativeTerminal) {
         return;
       }
 
@@ -3667,7 +3657,7 @@ void main() {
     });
 
     test('line feed preserves the current column in VT mode', () {
-      if (!_hasNativeTerminal) {
+      if (!hasNativeTerminal) {
         return;
       }
 
@@ -3678,7 +3668,7 @@ void main() {
     });
 
     test('carriage return overwrites the current line', () {
-      if (!_hasNativeTerminal) {
+      if (!hasNativeTerminal) {
         return;
       }
 
@@ -3688,7 +3678,7 @@ void main() {
     });
 
     test('backspace moves the cursor left without truncating the tail', () {
-      if (!_hasNativeTerminal) {
+      if (!hasNativeTerminal) {
         return;
       }
 
@@ -3698,7 +3688,7 @@ void main() {
     });
 
     test('shell erase echo clears the cell and leaves the cursor there', () {
-      if (!_hasNativeTerminal) {
+      if (!hasNativeTerminal) {
         return;
       }
 
@@ -3712,7 +3702,7 @@ void main() {
     });
 
     test('clear resets lines', () {
-      if (!_hasNativeTerminal) {
+      if (!hasNativeTerminal) {
         return;
       }
 
@@ -3725,7 +3715,7 @@ void main() {
     });
 
     test('resize updates the live terminal grid', () {
-      if (!_hasNativeTerminal) {
+      if (!hasNativeTerminal) {
         return;
       }
 
@@ -3738,7 +3728,7 @@ void main() {
     });
 
     test('OSC title commands are parsed', () {
-      if (!_hasNativeTerminal) {
+      if (!hasNativeTerminal) {
         return;
       }
 
@@ -3753,7 +3743,7 @@ void main() {
     });
 
     test('plain formatting strips CSI while VT formatting preserves it', () {
-      if (!_hasNativeTerminal) {
+      if (!hasNativeTerminal) {
         return;
       }
 
@@ -3769,7 +3759,7 @@ void main() {
     });
 
     test('styled snapshot keeps ANSI colors, emphasis, and cursor info', () {
-      if (!_hasNativeTerminal) {
+      if (!hasNativeTerminal) {
         return;
       }
 
@@ -3801,7 +3791,7 @@ void main() {
     });
 
     test('snapshot selection extracts multi-line text ranges', () {
-      if (!_hasNativeTerminal) {
+      if (!hasNativeTerminal) {
         return;
       }
 
@@ -3820,7 +3810,7 @@ void main() {
     test(
       'snapshot hyperlink lookup and word selection detect visible URLs',
       () {
-        if (!_hasNativeTerminal) {
+        if (!hasNativeTerminal) {
           return;
         }
 
@@ -3846,7 +3836,7 @@ void main() {
     );
 
     test('maxLines truncates old lines from formatted snapshots', () {
-      if (!_hasNativeTerminal) {
+      if (!hasNativeTerminal) {
         return;
       }
 
@@ -3860,7 +3850,7 @@ void main() {
     });
 
     test('notifyListeners called on appendDebugOutput and clear', () {
-      if (!_hasNativeTerminal) {
+      if (!hasNativeTerminal) {
         return;
       }
 
@@ -3882,7 +3872,7 @@ void main() {
     test(
       'carriage return plus line feed starts the next line at column zero',
       () {
-        if (!_hasNativeTerminal) {
+        if (!hasNativeTerminal) {
           return;
         }
 
@@ -3893,7 +3883,7 @@ void main() {
     );
 
     test('interactive shell backspace rewrites the prompt line', () async {
-      if (!_hasNativeTerminal) {
+      if (!hasNativeTerminal) {
         return;
       }
 
@@ -3931,7 +3921,7 @@ void main() {
     });
 
     test('interactive clean zsh handles arrow editing and backspace', () async {
-      if (!_hasNativeTerminal) {
+      if (!hasNativeTerminal) {
         return;
       }
 
@@ -3993,7 +3983,7 @@ void main() {
     });
 
     test('interactive clean zsh handles editing with a right prompt', () async {
-      if (!_hasNativeTerminal) {
+      if (!hasNativeTerminal) {
         return;
       }
 
