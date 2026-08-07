@@ -135,6 +135,30 @@ jobs:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
         shell: bash
 
+      # Play rejects any .so with a LOAD segment aligned below 16 KB, and the
+      # rejection only surfaces at submission — long after the release is cut.
+      # The alignment comes from rustflags in the crate's .cargo/config.toml;
+      # this gate exists because `cross` builds in its own container, so an
+      # image that starts exporting RUSTFLAGS would silently override them.
+      - name: Verify 16 KB page alignment
+        if: startsWith(matrix.os_label, 'android-')
+        working-directory: pkgs/pty/portable_pty/rust
+        run: |
+          SO="target/${{ matrix.rust_target }}/release/${{ matrix.artifact }}"
+          fail=0
+          while read -r align; do
+            if [ "$((align))" -lt 16384 ]; then
+              echo "::error::LOAD segment aligned at $align (need >= 0x4000) in $SO"
+              fail=1
+            fi
+          done < <(readelf -lW "$SO" | awk '$1=="LOAD"{print $NF}')
+          if [ "$fail" -ne 0 ]; then
+            readelf -lW "$SO" | awk '$1=="Type"||$1=="LOAD"'
+            exit 1
+          fi
+          echo "OK: every LOAD segment in $SO is >= 16 KB aligned"
+        shell: bash
+
       - name: Package artifact
         run: |
           mkdir -p staging

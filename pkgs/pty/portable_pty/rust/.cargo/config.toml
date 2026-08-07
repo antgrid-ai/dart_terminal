@@ -1,0 +1,28 @@
+# Android shared objects must be 16 KB page-aligned or Google Play rejects the
+# upload ("LOAD segment not aligned"). NDK r28+ already defaults to this, but the
+# default is the only thing enforcing it — a toolchain that predates r28, or a
+# `cross` container carrying its own older NDK, silently produces 4 KB and the
+# failure only surfaces at Play submission. Setting the flags explicitly makes
+# the alignment a property of the crate rather than of whoever builds it.
+#
+# The linker is deliberately not set here: it is an absolute path to an NDK
+# clang wrapper, so it has to come from the environment
+# (CARGO_TARGET_<TRIPLE>_LINKER) or a generated config.
+
+[target.aarch64-linux-android]
+rustflags = [
+  "-C", "link-arg=-Wl,-z,max-page-size=16384",
+  "-C", "link-arg=-Wl,-z,common-page-size=16384",
+]
+
+[target.armv7-linux-androideabi]
+rustflags = [
+  "-C", "link-arg=-Wl,-z,max-page-size=16384",
+  "-C", "link-arg=-Wl,-z,common-page-size=16384",
+]
+
+[target.x86_64-linux-android]
+rustflags = [
+  "-C", "link-arg=-Wl,-z,max-page-size=16384",
+  "-C", "link-arg=-Wl,-z,common-page-size=16384",
+]
