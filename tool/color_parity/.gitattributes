@@ -1,0 +1,6 @@
+# color_torture.bin is a raw VT byte stream containing no NUL bytes, so git's
+# text/binary heuristic reads it as a 39-line text file. Under core.autocrlf
+# a checkout would rewrite every LF to CRLF and silently change the corpus the
+# committed expected_cells.json fixture was generated from — and the parity
+# comparison is gated on the native engine, so CI would never notice.
+color_torture.bin binary
