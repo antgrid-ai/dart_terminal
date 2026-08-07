@@ -1274,7 +1274,9 @@ final class _GhosttyTerminalSnapshotParser {
         case GhosttySgrAttributeTag.GHOSTTY_SGR_ATTR_UNSET:
           _style = GhosttyTerminalStyle(hyperlink: _style.hyperlink);
           break;
+        // MAX_VALUE is an ABI width sentinel, never a real tag.
         case GhosttySgrAttributeTag.GHOSTTY_SGR_ATTR_UNKNOWN:
+        case GhosttySgrAttributeTag.GHOSTTY_SGR_ATTR_MAX_VALUE:
           break;
       }
     }

@@ -3364,6 +3364,10 @@ class _GhosttyTerminalPainter extends CustomPainter {
           .GHOSTTY_RENDER_STATE_CURSOR_VISUAL_STYLE_BAR:
       case GhosttyRenderStateCursorVisualStyle
           .GHOSTTY_RENDER_STATE_CURSOR_VISUAL_STYLE_BLOCK:
+      // MAX_VALUE is an ABI width sentinel, never a real style; fall in with
+      // the block shape so exhaustiveness still catches a real new variant.
+      case GhosttyRenderStateCursorVisualStyle
+          .GHOSTTY_RENDER_STATE_CURSOR_VISUAL_STYLE_MAX_VALUE:
         if (shouldShowCursorFill) {
           canvas.drawRect(shapeRect, fillPaint);
         }

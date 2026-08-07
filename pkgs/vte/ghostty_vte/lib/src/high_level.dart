@@ -385,7 +385,11 @@ void _writeStyleColorToNative(
 ) {
   native.tagAsInt = color.tag.value;
   switch (color.tag) {
+    // MAX_VALUE is an ABI width sentinel, never a real tag. Folding it into
+    // the neutral case keeps exhaustiveness checking, so a genuinely new
+    // variant still breaks the build instead of being silently absorbed.
     case bindings.GhosttyStyleColorTag.GHOSTTY_STYLE_COLOR_NONE:
+    case bindings.GhosttyStyleColorTag.GHOSTTY_STYLE_COLOR_TAG_MAX_VALUE:
       native.value.palette = 0;
     case bindings.GhosttyStyleColorTag.GHOSTTY_STYLE_COLOR_PALETTE:
       native.value.palette = color.paletteIndex ?? 0;
@@ -846,7 +850,8 @@ final class VtStyleColor {
 
   factory VtStyleColor.fromNative(bindings.GhosttyStyleColor native) {
     return switch (native.tag) {
-      bindings.GhosttyStyleColorTag.GHOSTTY_STYLE_COLOR_NONE =>
+      bindings.GhosttyStyleColorTag.GHOSTTY_STYLE_COLOR_NONE ||
+      bindings.GhosttyStyleColorTag.GHOSTTY_STYLE_COLOR_TAG_MAX_VALUE =>
         const VtStyleColor.none(),
       bindings.GhosttyStyleColorTag.GHOSTTY_STYLE_COLOR_PALETTE =>
         VtStyleColor.palette(native.value.palette),
@@ -1350,7 +1355,9 @@ final class VtRenderColors {
   /// Returns [defaultColor] when [color] is unset.
   VtRgbColor? resolve(VtStyleColor color, {VtRgbColor? defaultColor}) {
     return switch (color.tag) {
-      bindings.GhosttyStyleColorTag.GHOSTTY_STYLE_COLOR_NONE => defaultColor,
+      bindings.GhosttyStyleColorTag.GHOSTTY_STYLE_COLOR_NONE ||
+      bindings.GhosttyStyleColorTag.GHOSTTY_STYLE_COLOR_TAG_MAX_VALUE =>
+        defaultColor,
       bindings.GhosttyStyleColorTag.GHOSTTY_STYLE_COLOR_PALETTE => paletteAt(
         color.paletteIndex!,
       ),
@@ -2552,23 +2559,52 @@ final class VtTerminal {
     required int rows,
     required int maxScrollback,
   }) {
-    final optionsPtr = calloc<bindings.GhosttyTerminalOptions>();
     final out = calloc<bindings.GhosttyTerminal>();
     try {
-      optionsPtr.ref
-        ..cols = _checkPositiveUint16(cols, 'cols')
-        ..rows = _checkPositiveUint16(rows, 'rows')
-        ..max_scrollback = _checkNonNegative(maxScrollback, 'maxScrollback');
       final result = bindings.ghostty_terminal_new(
         ffi.nullptr,
         out,
-        optionsPtr.ref,
+        _checkPositiveUint16(cols, 'cols'),
+        _checkPositiveUint16(rows, 'rows'),
       );
       _checkResult(result, 'ghostty_terminal_new');
-      return out.value;
+
+      final terminal = out.value;
+      try {
+        _setScrollbackMaxBytes(terminal, maxScrollback);
+      } catch (_) {
+        bindings.ghostty_terminal_free(terminal);
+        rethrow;
+      }
+      return terminal;
     } finally {
       calloc.free(out);
-      calloc.free(optionsPtr);
+    }
+  }
+
+  /// Applies the scrollback budget that `ghostty_terminal_new` used to carry.
+  ///
+  /// Upstream moved the limit out of the constructor into `terminal_set`; the
+  /// byte limit is what the old `max_scrollback` field meant.
+  static void _setScrollbackMaxBytes(
+    bindings.GhosttyTerminal terminal,
+    int maxScrollback,
+  ) {
+    final value = calloc<ffi.Size>();
+    try {
+      value.value = _checkNonNegative(maxScrollback, 'maxScrollback');
+      _checkResult(
+        bindings.ghostty_terminal_set(
+          terminal,
+          bindings
+              .GhosttyTerminalOption
+              .GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_BYTES,
+          value.cast(),
+        ),
+        'ghostty_terminal_set(scrollback_max_bytes)',
+      );
+    } finally {
+      calloc.free(value);
     }
   }
 
