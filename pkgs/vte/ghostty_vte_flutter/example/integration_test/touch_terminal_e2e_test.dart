@@ -135,11 +135,11 @@ void main() {
     final gesture = await tester.createGesture(
       kind: ui.PointerDeviceKind.touch,
     );
-    final scrollStart = Offset(
-      terminalRect.center.dx,
-      terminalRect.bottom - 80,
-    );
-    final scrollEnd = Offset(terminalRect.center.dx, terminalRect.top + 80);
+    // Swipe DOWN to scroll back into history: offset 0 is the live bottom, so a
+    // finger travelling up has nothing left to reveal and the offset stays
+    // clamped at 0.
+    final scrollStart = Offset(terminalRect.center.dx, terminalRect.top + 80);
+    final scrollEnd = Offset(terminalRect.center.dx, terminalRect.bottom - 80);
     await gesture.down(scrollStart);
     await tester.pump();
 
@@ -471,7 +471,7 @@ void main() {
     expect(controller.mouseEvents, isEmpty);
   });
 
-  testWidgets('terminalMouseFirst forwards touch terminal mouse events', (
+  testWidgets('terminalMouseFirst forwards a touch tap as a left click', (
     tester,
   ) async {
     final controller = _RecordingTerminalController();
@@ -489,11 +489,11 @@ void main() {
     final gesture = await tester.createGesture(
       kind: ui.PointerDeviceKind.touch,
     );
+    // A tap, not a drag: touch defers PRESS to pointer-up so a swipe can become
+    // wheel scroll instead, and never emits MOTION — a finger past kTouchSlop
+    // cancels the pending click outright. The click contract therefore has to be
+    // exercised by a completed tap.
     await gesture.down(terminalRect.center);
-    await tester.pump();
-    await gesture.moveTo(
-      Offset(terminalRect.center.dx + 40, terminalRect.center.dy),
-    );
     await tester.pump();
     await gesture.up();
     await _settleInteraction(tester);
@@ -505,9 +505,8 @@ void main() {
     );
     expect(
       controller.mouseEvents.map((event) => event.action),
-      containsAll(<GhosttyMouseAction>[
+      containsAllInOrder(<GhosttyMouseAction>[
         GhosttyMouseAction.GHOSTTY_MOUSE_ACTION_PRESS,
-        GhosttyMouseAction.GHOSTTY_MOUSE_ACTION_MOTION,
         GhosttyMouseAction.GHOSTTY_MOUSE_ACTION_RELEASE,
       ]),
     );

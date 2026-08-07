@@ -2848,13 +2848,18 @@ void main() {
       );
       await tester.pumpAndSettle();
 
+      // Finger moves DOWN to reveal earlier output (natural scrolling: drag the
+      // content down to scroll up into history). Delivered as several frames
+      // because a real swipe is many move events, not one jump.
       final gesture = await tester.createGesture(
         kind: ui.PointerDeviceKind.touch,
       );
-      await gesture.down(const Offset(300, 320));
+      await gesture.down(const Offset(300, 80));
       await tester.pump();
-      await gesture.moveTo(const Offset(300, 80));
-      await tester.pump();
+      for (var i = 0; i < 8; i++) {
+        await gesture.moveBy(const Offset(0, 30));
+        await tester.pump();
+      }
       await gesture.up();
       await tester.pumpAndSettle();
 
