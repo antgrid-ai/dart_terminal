@@ -12,7 +12,17 @@ import 'dart:io';
 
 import '../pkgs/vte/ghostty_vte/lib/src/hook/dynamic_library.dart';
 
-const _repo = 'kingwill101/dart_terminal';
+/// Release host for a package's prebuilt artifacts.
+///
+/// The two packages diverged: this fork rebuilds and hosts PTY because
+/// upstream's Android libraries are 4 KB page-aligned and Play rejects them,
+/// while VTE's artifacts are still upstream's and are fetched from there. Keep
+/// this in step with each package's `native_prebuilt.yaml` `release.repository`.
+String _repoFor(String lib) => switch (lib) {
+  'pty' => 'bharathm03/dart_terminal',
+  'vte' => 'kingwill101/dart_terminal',
+  _ => throw ArgumentError.value(lib, 'lib'),
+};
 const _defaultTag = 'latest';
 
 /// Maps (library, OS, arch) → the tar.gz artifact name in the release.
@@ -46,7 +56,9 @@ typedef _ArtifactDownload = ({String label, String filename});
 
 Future<void> main(List<String> args) async {
   var tag = _defaultTag;
-  var lib = 'all';
+  // No default: VTE and PTY release from different repositories on independent
+  // tags, so one invocation covers exactly one package.
+  String? lib;
   String? platform;
   var allPlatforms = false;
 
@@ -69,13 +81,26 @@ Future<void> main(List<String> args) async {
           'Usage: dart run tool/prebuilt.dart [options]\n'
           '\n'
           '  --tag, -t       Release tag (default: latest)\n'
-          '  --lib, -l       vte | pty | all (default: all)\n'
+          '  --lib, -l       vte | pty (required)\n'
           '  --platform, -p  e.g. linux-x64, macos-arm64 (default: host)\n'
-          '  --all-platforms Download for all platforms\n',
+          '  --all-platforms Download for all platforms\n'
+          '\n'
+          'VTE resolves from kingwill101/dart_terminal, PTY from this fork, so\n'
+          'each has its own tag and must be downloaded separately.\n',
         );
         return;
     }
   }
+
+  if (lib == null || !{'vte', 'pty'}.contains(lib)) {
+    stderr.writeln(
+      'Error: --lib is required (vte or pty). The packages release from '
+      'different repositories, so a single tag cannot cover both.',
+    );
+    exitCode = 1;
+    return;
+  }
+  final repo = _repoFor(lib);
 
   platform ??= _hostPlatform();
 
@@ -87,11 +112,12 @@ Future<void> main(List<String> args) async {
     ..createSync(recursive: true);
 
   stdout.writeln('Cache directory: ${cacheDir.path}');
+  stdout.writeln('Repository:      $repo');
   stdout.writeln('Release tag:     $tag');
   stdout.writeln('');
 
   final artifacts = <_ArtifactDownload>[];
-  if (lib == 'vte' || lib == 'all') {
+  if (lib == 'vte') {
     if (allPlatforms) {
       artifacts.addAll(
         _vteArtifacts.entries.map(
@@ -106,7 +132,7 @@ Future<void> main(List<String> args) async {
       artifacts.add((label: 'wasm', filename: _vteArtifacts['wasm']!));
     }
   }
-  if (lib == 'pty' || lib == 'all') {
+  if (lib == 'pty') {
     if (allPlatforms) {
       artifacts.addAll(
         _ptyArtifacts.entries.map(
@@ -124,7 +150,7 @@ Future<void> main(List<String> args) async {
     return;
   }
 
-  final resolvedTag = await _resolveTag(tag);
+  final resolvedTag = await _resolveTag(tag, repo);
   stdout.writeln('Resolved tag: $resolvedTag\n');
 
   var failures = 0;
@@ -136,7 +162,7 @@ Future<void> main(List<String> args) async {
 
     stdout.write('  $filename → ${outDir.path} ... ');
     try {
-      await _downloadAndExtract(resolvedTag, filename, outDir);
+      await _downloadAndExtract(resolvedTag, filename, outDir, repo);
       stdout.writeln('✓');
     } on Exception catch (e) {
       stdout.writeln('✗');
@@ -223,14 +249,14 @@ Directory _findProjectRoot(Directory start) {
   }
 }
 
-Future<String> _resolveTag(String tag) async {
+Future<String> _resolveTag(String tag, String repo) async {
   if (tag != 'latest') return tag;
 
   final result = await Process.run('gh', [
     'release',
     'view',
     '--repo',
-    _repo,
+    repo,
     '--json',
     'tagName',
     '-q',
@@ -249,8 +275,9 @@ Future<void> _downloadAndExtract(
   String tag,
   String filename,
   Directory outDir,
+  String repo,
 ) async {
-  final url = 'https://github.com/$_repo/releases/download/$tag/$filename';
+  final url = 'https://github.com/$repo/releases/download/$tag/$filename';
 
   // Download with curl (available on all platforms).
   final tarPath = '${outDir.path}/$filename';

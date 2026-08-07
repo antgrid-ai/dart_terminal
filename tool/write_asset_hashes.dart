@@ -24,12 +24,24 @@ import '../pkgs/pty/portable_pty/lib/src/hook/artifacts.dart';
 import '../pkgs/vte/ghostty_vte/lib/src/hook/artifacts.dart';
 import '../pkgs/vte/ghostty_vte/lib/src/hook/dynamic_library.dart';
 
-const _repo = 'kingwill101/dart_terminal';
+/// Release host for a package's prebuilt artifacts.
+///
+/// The two packages diverged: this fork rebuilds and hosts PTY because
+/// upstream's Android libraries are 4 KB page-aligned and Play rejects them,
+/// while VTE's artifacts are still upstream's and are fetched from there. Keep
+/// this in step with each package's `native_prebuilt.yaml` `release.repository`.
+String _repoFor(String packagePrefix) => switch (packagePrefix) {
+  'pty' => 'bharathm03/dart_terminal',
+  'vte' => 'kingwill101/dart_terminal',
+  _ => throw ArgumentError.value(packagePrefix, 'packagePrefix'),
+};
 
 Future<void> main(List<String> args) async {
   String? tag;
   var verify = false;
-  var package = 'all'; // vte | pty | all
+  // No default: one --tag cannot serve both packages now that they release from
+  // different repositories on independent tags, so the caller must say which.
+  String? package;
 
   for (var i = 0; i < args.length; i++) {
     switch (args[i]) {
@@ -41,9 +53,9 @@ Future<void> main(List<String> args) async {
       case '--package':
       case '-p':
         package = args[++i];
-        if (!{'vte', 'pty', 'all'}.contains(package)) {
+        if (!{'vte', 'pty'}.contains(package)) {
           stderr.writeln(
-            "Error: --package must be one of: vte, pty, all (got '$package')",
+            "Error: --package must be one of: vte, pty (got '$package')",
           );
           exitCode = 1;
           return;
@@ -51,11 +63,14 @@ Future<void> main(List<String> args) async {
       case '--help':
       case '-h':
         stdout.writeln(
-          'Usage: dart run tool/write_asset_hashes.dart --tag <tag> [--package vte|pty|all] [--verify]\n'
+          'Usage: dart run tool/write_asset_hashes.dart --tag <tag> --package <vte|pty> [--verify]\n'
           '\n'
           '  --tag, -t        Release tag (required)\n'
-          '  --package, -p    Which package to process: vte, pty, or all (default: all)\n'
-          '  --verify         Verify existing files match instead of overwriting\n',
+          '  --package, -p    Which package to process: vte or pty (required)\n'
+          '  --verify         Verify existing files match instead of overwriting\n'
+          '\n'
+          'VTE resolves from kingwill101/dart_terminal, PTY from this fork, so\n'
+          'each has its own tag and must be regenerated separately.\n',
         );
         return;
     }
@@ -67,10 +82,19 @@ Future<void> main(List<String> args) async {
     return;
   }
 
+  if (package == null) {
+    stderr.writeln(
+      'Error: --package is required (vte or pty). The packages release from '
+      'different repositories, so a single tag cannot cover both.',
+    );
+    exitCode = 1;
+    return;
+  }
+
   final tmpDir = await Directory.systemTemp.createTemp('asset_hashes_');
 
   try {
-    if (package == 'vte' || package == 'all') {
+    if (package == 'vte') {
       // Download and hash VTE artifacts.
       stdout.writeln('Processing VTE artifacts for $tag...');
       final vteHashes = await _downloadAndHash(
@@ -99,7 +123,7 @@ Future<void> main(List<String> args) async {
       }
     }
 
-    if (package == 'pty' || package == 'all') {
+    if (package == 'pty') {
       // Download and hash PTY artifacts.
       stdout.writeln('Processing PTY artifacts for $tag...');
       final ptyHashes = await _downloadAndHash(
@@ -159,7 +183,7 @@ Future<Map<String, String>> _downloadAndHash(
       'download',
       tag,
       '--repo',
-      _repo,
+      _repoFor(packagePrefix),
       '--pattern',
       tarball,
       '--dir',

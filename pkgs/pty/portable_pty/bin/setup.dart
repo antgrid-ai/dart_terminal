@@ -12,7 +12,10 @@ import 'dart:io';
 import 'package:portable_pty/src/hook/artifacts.dart';
 import 'package:portable_pty/src/hook/asset_hashes.dart';
 
-const _repo = 'kingwill101/dart_terminal';
+// This fork hosts its own PTY artifacts because upstream's Android libraries are
+// 4 KB page-aligned and Play rejects them. ghostty_vte still resolves from
+// kingwill101 — only PTY diverged.
+const _repo = 'bharathm03/dart_terminal';
 const _defaultTag = releaseTag;
 
 Future<void> main(List<String> args) async {

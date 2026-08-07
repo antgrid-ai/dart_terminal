@@ -7,16 +7,20 @@ asset_name: portable_pty_bindings_generated.dart
 library_stem: portable_pty_rs
 link_mode: dynamic_library
 
+# The source-build fallback clones this revision rather than using the local
+# tree, so it must point at a commit that carries rust/.cargo/config.toml —
+# otherwise a source build silently produces 4 KB-aligned Android libraries even
+# though the checkout in hand is fixed.
 source:
   type: git
-  repository: https://github.com/kingwill101/dart_terminal
-  revision: 6c662511a7de5447c762ef6055cb3fa615eaeaed
+  repository: https://github.com/bharathm03/dart_terminal
+  revision: 6faee7d360e5acf917d59faeaaf37573de88d71f
   subdirectory: pkgs/pty/portable_pty
 
 release:
   provider: github
-  repository: kingwill101/dart_terminal
-  tag: portable_pty-v0.0.6
+  repository: bharathm03/dart_terminal
+  tag: portable_pty-v0.0.6+antgrid.1
 
 variables:
   cargo_manifest: "{{ source.path }}/rust/Cargo.toml"
