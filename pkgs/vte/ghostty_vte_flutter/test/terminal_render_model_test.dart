@@ -153,47 +153,50 @@ void main() {
       expect(invisible.background, equals(Colors.transparent));
     });
 
-    test('faint applies to the default foreground, not the transparent sentinel', () {
-      // Regression guard for the ordering bug: faint used to run BEFORE the
-      // transparent-foreground fallback. Because the sentinel is
-      // Color(0x00000000), reducing its alpha produced 0xB8000000 — which no
-      // longer compares equal to transparent, so the default-foreground
-      // fallback was skipped and dim default text rendered as translucent
-      // black instead of a dimmed default colour.
-      final faintDefault = GhosttyTerminalResolvedStyle.fromNativeStyle(
-        style: const VtStyle(
-          foreground: VtStyleColor.none(),
-          background: VtStyleColor.none(),
-          underlineColor: VtStyleColor.none(),
-          bold: false,
-          italic: false,
-          faint: true,
-          blink: false,
-          inverse: false,
-          invisible: false,
-          strikethrough: false,
-          overline: false,
-          underline: GhosttySgrUnderline.GHOSTTY_SGR_UNDERLINE_NONE,
-        ),
-        palette: palette,
-        defaultForeground: defaultForeground,
-        defaultBackground: defaultBackground,
-      );
-
-      expect(
-        faintDefault.foreground,
-        equals(
-          Color.from(
-            alpha: 1.0,
-            red: defaultForeground.r * 0.5,
-            green: defaultForeground.g * 0.5,
-            blue: defaultForeground.b * 0.5,
+    test(
+      'faint applies to the default foreground, not the transparent sentinel',
+      () {
+        // Regression guard for the ordering bug: faint used to run BEFORE the
+        // transparent-foreground fallback. Because the sentinel is
+        // Color(0x00000000), reducing its alpha produced 0xB8000000 — which no
+        // longer compares equal to transparent, so the default-foreground
+        // fallback was skipped and dim default text rendered as translucent
+        // black instead of a dimmed default colour.
+        final faintDefault = GhosttyTerminalResolvedStyle.fromNativeStyle(
+          style: const VtStyle(
+            foreground: VtStyleColor.none(),
+            background: VtStyleColor.none(),
+            underlineColor: VtStyleColor.none(),
+            bold: false,
+            italic: false,
+            faint: true,
+            blink: false,
+            inverse: false,
+            invisible: false,
+            strikethrough: false,
+            overline: false,
+            underline: GhosttySgrUnderline.GHOSTTY_SGR_UNDERLINE_NONE,
           ),
-        ),
-      );
-      // Specifically: fully opaque, and not the old translucent-black result.
-      expect(faintDefault.foreground.a, equals(1.0));
-    });
+          palette: palette,
+          defaultForeground: defaultForeground,
+          defaultBackground: defaultBackground,
+        );
+
+        expect(
+          faintDefault.foreground,
+          equals(
+            Color.from(
+              alpha: 1.0,
+              red: defaultForeground.r * 0.5,
+              green: defaultForeground.g * 0.5,
+              blue: defaultForeground.b * 0.5,
+            ),
+          ),
+        );
+        // Specifically: fully opaque, and not the old translucent-black result.
+        expect(faintDefault.foreground.a, equals(1.0));
+      },
+    );
 
     test('formatter and native style resolution stay aligned', () {
       const formattedStyle = GhosttyTerminalStyle(

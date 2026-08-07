@@ -64,10 +64,7 @@ void main() {
       controller.appendDebugOutput(buffer.toString());
 
       String firstCellOfRow(GhosttyTerminalRenderSnapshot snap, int row) =>
-          snap.rowsData[row].cells
-              .map((c) => c.text)
-              .join()
-              .trimRight();
+          snap.rowsData[row].cells.map((c) => c.text).join().trimRight();
 
       // Following the bottom: the viewport shows the latest lines, not line0.
       expect(controller.isViewportAtBottom, isTrue);
@@ -103,39 +100,36 @@ void main() {
     },
   );
 
-  test(
-    'scrolled-up viewport is held while new output is ingested',
-    () {
-      if (!hasNativeTerminal) {
-        return;
-      }
+  test('scrolled-up viewport is held while new output is ingested', () {
+    if (!hasNativeTerminal) {
+      return;
+    }
 
-      final controller = GhosttyTerminalController(
-        initialCols: 20,
-        initialRows: 6,
-      );
-      addTearDown(controller.dispose);
+    final controller = GhosttyTerminalController(
+      initialCols: 20,
+      initialRows: 6,
+    );
+    addTearDown(controller.dispose);
 
-      final buffer = StringBuffer();
-      for (var i = 0; i < 30; i++) {
-        buffer.write('line$i\r\n');
-      }
-      controller.appendDebugOutput(buffer.toString());
+    final buffer = StringBuffer();
+    for (var i = 0; i < 30; i++) {
+      buffer.write('line$i\r\n');
+    }
+    controller.appendDebugOutput(buffer.toString());
 
-      controller.scrollViewportToTop();
-      expect(controller.isViewportAtBottom, isFalse);
-      final offsetBefore = controller.viewportScrollbar!.offset;
+    controller.scrollViewportToTop();
+    expect(controller.isViewportAtBottom, isFalse);
+    final offsetBefore = controller.viewportScrollbar!.offset;
 
-      // New output arrives while scrolled up: viewport must NOT snap to bottom.
-      controller.appendDebugOutput('fresh-tail\r\n');
-      expect(controller.isViewportAtBottom, isFalse);
-      expect(
-        controller.viewportScrollbar!.offset,
-        offsetBefore,
-        reason: 'scrolled-up viewport offset should be preserved on new output',
-      );
-    },
-  );
+    // New output arrives while scrolled up: viewport must NOT snap to bottom.
+    controller.appendDebugOutput('fresh-tail\r\n');
+    expect(controller.isViewportAtBottom, isFalse);
+    expect(
+      controller.viewportScrollbar!.offset,
+      offsetBefore,
+      reason: 'scrolled-up viewport offset should be preserved on new output',
+    );
+  });
 
   test('write/sendKey return false when process is not running', () {
     final controller = GhosttyTerminalController();
@@ -381,36 +375,45 @@ void main() {
     );
   });
 
-  test('scrollViewportToOffsetFromBottom positions and clamps the viewport', () {
-    if (!hasNativeTerminal) {
-      return;
-    }
-    final controller = GhosttyTerminalController(initialCols: 20, initialRows: 6);
-    addTearDown(controller.dispose);
+  test(
+    'scrollViewportToOffsetFromBottom positions and clamps the viewport',
+    () {
+      if (!hasNativeTerminal) {
+        return;
+      }
+      final controller = GhosttyTerminalController(
+        initialCols: 20,
+        initialRows: 6,
+      );
+      addTearDown(controller.dispose);
 
-    final buffer = StringBuffer();
-    for (var i = 0; i < 30; i++) {
-      buffer.write('line$i\r\n');
-    }
-    controller.appendDebugOutput(buffer.toString());
+      final buffer = StringBuffer();
+      for (var i = 0; i < 30; i++) {
+        buffer.write('line$i\r\n');
+      }
+      controller.appendDebugOutput(buffer.toString());
 
-    controller.scrollViewportToOffsetFromBottom(0);
-    expect(controller.isViewportAtBottom, isTrue);
+      controller.scrollViewportToOffsetFromBottom(0);
+      expect(controller.isViewportAtBottom, isTrue);
 
-    controller.scrollViewportToOffsetFromBottom(5);
-    final bar = controller.viewportScrollbar!;
-    expect(bar.total - bar.length - bar.offset, 5);
-    expect(controller.isViewportAtBottom, isFalse);
+      controller.scrollViewportToOffsetFromBottom(5);
+      final bar = controller.viewportScrollbar!;
+      expect(bar.total - bar.length - bar.offset, 5);
+      expect(controller.isViewportAtBottom, isFalse);
 
-    controller.scrollViewportToOffsetFromBottom(100000);
-    expect(controller.viewportScrollbar!.offset, 0);
-  });
+      controller.scrollViewportToOffsetFromBottom(100000);
+      expect(controller.viewportScrollbar!.offset, 0);
+    },
+  );
 
   test('cursor leaves the viewport when scrolled into history', () {
     if (!hasNativeTerminal) {
       return;
     }
-    final controller = GhosttyTerminalController(initialCols: 20, initialRows: 6);
+    final controller = GhosttyTerminalController(
+      initialCols: 20,
+      initialRows: 6,
+    );
     addTearDown(controller.dispose);
 
     final buffer = StringBuffer();
@@ -432,7 +435,8 @@ void main() {
     final scrolled = controller.renderSnapshot!;
     final cursor = scrolled.cursor;
     final visibleRows = scrolled.rowsData.length;
-    final inViewport = cursor.hasViewportPosition &&
+    final inViewport =
+        cursor.hasViewportPosition &&
         cursor.row != null &&
         cursor.row! >= 0 &&
         cursor.row! < visibleRows;
@@ -443,7 +447,10 @@ void main() {
     if (!hasNativeTerminal) {
       return;
     }
-    final controller = GhosttyTerminalController(initialCols: 20, initialRows: 6);
+    final controller = GhosttyTerminalController(
+      initialCols: 20,
+      initialRows: 6,
+    );
     addTearDown(controller.dispose);
     final buffer = StringBuffer();
     for (var i = 0; i < 40; i++) {
@@ -483,7 +490,10 @@ void main() {
     }
     // Freshly-constructed controller with no writes yet: the native terminal
     // has not been created, so these scroll calls hit the null-terminal branch.
-    final controller = GhosttyTerminalController(initialCols: 20, initialRows: 6);
+    final controller = GhosttyTerminalController(
+      initialCols: 20,
+      initialRows: 6,
+    );
     addTearDown(controller.dispose);
 
     // Driving an offset away from the bottom must clear follow so the first
@@ -546,7 +556,10 @@ void main() {
     if (!hasNativeTerminal) {
       return;
     }
-    final controller = GhosttyTerminalController(initialCols: 40, initialRows: 6);
+    final controller = GhosttyTerminalController(
+      initialCols: 40,
+      initialRows: 6,
+    );
     addTearDown(controller.dispose);
     controller.appendDebugOutput(
       '\x1b[31mhello\x1b[0m world\r\n'
@@ -557,7 +570,10 @@ void main() {
     // the formatter color paint branch is deleted; the snapshot keeps the text).
     final sel = controller.snapshot.lineSelectionBetweenRows(0, 0);
     expect(sel, isNotNull);
-    expect(controller.snapshot.textForSelection(sel!).trimRight(), 'hello world');
+    expect(
+      controller.snapshot.textForSelection(sel!).trimRight(),
+      'hello world',
+    );
 
     // Word selection still works.
     final word = controller.snapshot.wordSelectionAt(
@@ -617,7 +633,9 @@ void main() {
       expect(String.fromCharCodes(sent), '\x1b[O');
 
       sent.clear();
-      controller.appendOutputBytes('x'.codeUnits); // no state change → no resend
+      controller.appendOutputBytes(
+        'x'.codeUnits,
+      ); // no state change → no resend
       expect(sent, isEmpty);
     });
 
@@ -650,7 +668,9 @@ void main() {
       controller.appendOutputBytes('\x1b[?1004h'.codeUnits); // → CSI O
       sent.clear();
       controller.appendOutputBytes('\x1b[?1004l'.codeUnits); // disable
-      controller.appendOutputBytes('\x1b[?1004h'.codeUnits); // re-enable → resend
+      controller.appendOutputBytes(
+        '\x1b[?1004h'.codeUnits,
+      ); // re-enable → resend
       expect(String.fromCharCodes(sent), '\x1b[O');
     });
 
