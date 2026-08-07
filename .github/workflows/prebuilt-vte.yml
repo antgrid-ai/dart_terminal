@@ -333,7 +333,12 @@ jobs:
 
   publish:
     name: Publish Dart packages
-    if: needs.release.outputs.prerelease != 'true'
+    # Disabled in this fork, same as in prebuilt-pty.yml: the step below runs
+    # `dart pub publish --force` on ghostty_vte and ghostty_vte_flutter, whose
+    # pub.dev names belong to upstream. This fork cuts no VTE releases today, so
+    # nothing reaches this job — but a stray `ghostty_vte-v*` tag would, and the
+    # push trigger needs no dispatch input to fire.
+    if: false
     needs: [release]
     runs-on: ubuntu-latest
     permissions:
