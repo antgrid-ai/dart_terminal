@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:collection';
 import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
@@ -7,6 +8,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:ghostty_vte/ghostty_vte.dart';
 
+import 'contrast.dart';
 import 'keyboard_input.dart';
 import 'terminal_auto_scroll_session.dart';
 import 'terminal_controller.dart';
@@ -18,15 +20,25 @@ import 'terminal_snapshot.dart';
 import 'terminal_selection_session.dart';
 
 /// Paint backend used by [GhosttyTerminalView].
+///
+/// [renderState] is the sole renderer: terminal content is painted from the
+/// native engine render-state snapshot. The retired formatter-driven mode has
+/// been removed. Platforms without a native engine (e.g. web) have no
+/// render-state snapshot and therefore paint background only.
 enum GhosttyTerminalRendererMode {
-  /// Formatter/snapshot-driven painting. This remains the default because it
-  /// currently gives the best fidelity for dense TUIs and scrollback content.
+  /// Formatter/snapshot-driven painting.
+  ///
+  /// Kept because it is the only renderer that needs no native engine: web
+  /// resolves no native assets, so its controller always reports a null render
+  /// snapshot. [renderState] falls back to this path rather than failing to
+  /// paint, which is what makes the widget usable on web at all.
   formatter,
 
-  /// Native Ghostty render-state painting for the live viewport.
+  /// Native Ghostty render-state painting.
   ///
-  /// This is useful for exercising the newer screen/render APIs without making
-  /// it the default path until feature parity is tighter.
+  /// The default. Also the only path that draws scrollback from the engine
+  /// instead of the formatter snapshot, so rows past the formatter's `maxLines`
+  /// cap stay reachable.
   renderState,
 }
 
@@ -91,6 +103,11 @@ final class GhosttyTerminalSelectionContextMenuDetails {
 }
 
 const double _terminalHeaderHeight = 28.0;
+
+/// Cap for the contrast-floor memo; ~4096 (fg, bg) pairs vastly exceeds any
+/// realistic on-screen color population, so hitting it means pathological
+/// churn — clearing wholesale is then cheaper than tracking recency.
+const int _contrastFloorCacheMaxEntries = 4096;
 const Set<PointerDeviceKind> _mouseLikePointerDevices = <PointerDeviceKind>{
   PointerDeviceKind.mouse,
   PointerDeviceKind.stylus,
@@ -113,11 +130,39 @@ const Key _selectionEndHandleKey = ValueKey<String>(
 
 enum _TerminalSelectionHandleEdge { start, end }
 
+/// Imperative handle for the terminal's soft keyboard (mobile IME), for hosts
+/// that disable [GhosttyTerminalView.showKeyboardOnInteraction] and provide
+/// their own affordance. Detached (no-op) while no view is attached; a view
+/// attaches itself for its lifetime.
+class GhosttyTerminalSoftKeyboardController {
+  VoidCallback? _show;
+  VoidCallback? _hide;
+  ValueGetter<bool>? _isVisible;
+
+  /// Focuses the attached terminal and opens the soft keyboard.
+  void show() => _show?.call();
+
+  /// Closes the soft keyboard (terminal keeps focus).
+  void hide() => _hide?.call();
+
+  /// Whether the soft keyboard (IME connection) is currently up. Reads the
+  /// attached view's live state, so it stays correct even after a system
+  /// dismiss (Android Back) that closes the IME without any explicit hide().
+  bool get isVisible => _isVisible?.call() ?? false;
+
+  /// Raises the keyboard if down, dismisses it if up. Reads [isVisible] live
+  /// on each call, so a single button can toggle without desyncing from a
+  /// Back-button dismiss.
+  void toggle() => isVisible ? hide() : show();
+}
+
 /// Painter-based terminal widget that renders lines from [GhosttyTerminalController].
 ///
-/// The controller now keeps a real [VtTerminal] alive, and this widget sizes
-/// that VT grid to the available layout while rendering styled VT formatter
-/// snapshots with lightweight Flutter painting.
+/// The controller keeps a real [VtTerminal] alive, and this widget sizes that
+/// VT grid to the available layout while painting the native engine's
+/// `renderState` rows (`renderSnapshot.rowsData`) with lightweight Flutter
+/// painting. The styled VT formatter snapshot is retained only for line-count /
+/// scroll-extent bookkeeping and as a selection-text fallback, not for painting.
 class GhosttyTerminalView extends StatefulWidget {
   const GhosttyTerminalView({
     required this.controller,
@@ -125,10 +170,13 @@ class GhosttyTerminalView extends StatefulWidget {
     this.autofocus = false,
     this.showHeader = true,
     this.showVerticalScrollbar = false,
+    this.showFocusRing = true,
     this.scrollController,
     this.scrollPhysics,
     this.autoFollowOnActivity = false,
     this.focusOnInteraction = true,
+    this.showKeyboardOnInteraction = true,
+    this.softKeyboardController,
     this.onTapTerminal,
     this.focusNode,
     this.backgroundColor = const Color(0xFF0A0F14),
@@ -139,11 +187,15 @@ class GhosttyTerminalView extends StatefulWidget {
     this.fontFamily,
     this.fontFamilyFallback,
     this.fontPackage,
+    this.fontWeight = FontWeight.w400,
+    this.boldFontWeight = FontWeight.w700,
     this.letterSpacing = 0,
     this.cellWidthScale = 1,
-    this.renderer = GhosttyTerminalRendererMode.formatter,
-    this.padding = const EdgeInsets.all(12),
+    this.renderer = GhosttyTerminalRendererMode.renderState,
+    this.padding = const EdgeInsets.all(8),
+    this.cellAlignment = Alignment.topLeft,
     this.palette = GhosttyTerminalPalette.xterm,
+    this.minimumContrastRatio,
     this.cursorColor = const Color(0xFF9AD1C0),
     this.selectionColor = const Color(0x665DA9FF),
     this.hyperlinkColor = const Color(0xFF61AFEF),
@@ -163,6 +215,9 @@ class GhosttyTerminalView extends StatefulWidget {
     this.onCopySelection,
     this.onPasteRequest,
     this.onOpenHyperlink,
+    this.onCellMetricsChanged,
+    this.onZoomUpdate,
+    this.onZoomEnd,
   });
 
   /// Session controller that owns the live VT terminal and process transport.
@@ -177,6 +232,12 @@ class GhosttyTerminalView extends StatefulWidget {
   /// Whether to show a local vertical scrollbar for transcript scrolling.
   final bool showVerticalScrollbar;
 
+  /// Whether to paint the 1px focus-state border around the terminal bounds.
+  /// Upstream paints a hardcoded `#2A83FF` ring when the view has focus;
+  /// set this to `false` when the host app provides its own focus indicator
+  /// or the ring clashes with the app palette.
+  final bool showFocusRing;
+
   /// Optional Flutter scroll controller for transcript scrolling.
   final ScrollController? scrollController;
 
@@ -188,6 +249,18 @@ class GhosttyTerminalView extends StatefulWidget {
 
   /// Whether terminal gestures should request focus for keyboard input.
   final bool focusOnInteraction;
+
+  /// Whether focus/tap interactions summon the platform soft keyboard (mobile
+  /// IME). When `false`, taps still focus the terminal (hardware keys work)
+  /// but the on-screen keyboard only appears via [softKeyboardController] —
+  /// for hosts that reserve taps for scrolling/selection and provide their
+  /// own explicit keyboard affordance. No effect on desktop/web, which have
+  /// no IME bridge.
+  final bool showKeyboardOnInteraction;
+
+  /// Imperative handle to show/hide the soft keyboard from outside the view
+  /// (e.g. a toolbar button). Only meaningful on mobile.
+  final GhosttyTerminalSoftKeyboardController? softKeyboardController;
 
   /// Optional callback invoked when the terminal receives a tap interaction.
   final VoidCallback? onTapTerminal;
@@ -227,6 +300,22 @@ class GhosttyTerminalView extends StatefulWidget {
   /// Optional package that provides [fontFamily].
   final String? fontPackage;
 
+  /// Weight for ordinary (non-SGR-bold) cells.
+  ///
+  /// Exists so a host can compensate for thin rasterization — Flutter draws
+  /// text with grayscale AA and no stem darkening, so on a low-DPI display
+  /// stems come out lighter than a DirectWrite/ClearType app's. Raising this
+  /// one step is the fix; it must be a weight the font family actually ships
+  /// a master for, or the engine synthesizes and the cell advance can shift.
+  final FontWeight fontWeight;
+
+  /// Weight for cells carrying SGR bold (ESC[1m).
+  ///
+  /// Kept separate rather than derived from [fontWeight] so raising the base
+  /// weight cannot silently collapse the bold/normal distinction — the whole
+  /// point of bold is that it reads as different from its neighbours.
+  final FontWeight boldFontWeight;
+
   /// Extra tracking applied to terminal glyph layout.
   final double letterSpacing;
 
@@ -239,8 +328,34 @@ class GhosttyTerminalView extends StatefulWidget {
   /// Inner padding between the widget bounds and the terminal grid.
   final EdgeInsets padding;
 
+  /// Where the floor-rounded cell grid sits inside the available content area.
+  ///
+  /// The grid lays out as whole rows × whole columns, so there's almost
+  /// always a sub-cell remainder on one axis. With the default
+  /// [Alignment.topLeft], that remainder accumulates on the right and bottom
+  /// (matching legacy behavior). [Alignment.center] splits the remainder
+  /// equally on all four sides — useful when the surrounding chrome and the
+  /// terminal background differ slightly: a single asymmetric strip reads as
+  /// "padding" against the chrome, while a centered remainder looks like
+  /// intentional inset on all sides. Any [Alignment] is accepted; only the
+  /// fractional axis values are used.
+  final Alignment cellAlignment;
+
   /// ANSI and 256-color palette used to resolve terminal color tokens.
   final GhosttyTerminalPalette palette;
+
+  /// Minimum WCAG 2.x contrast ratio enforced between each cell's foreground
+  /// and its effective background, applied per-cell at render time to
+  /// foregrounds only.
+  ///
+  /// Null (the default) disables the floor entirely — rendering is identical
+  /// to a build without the feature. When set (e.g. `4.5` for WCAG AA),
+  /// foregrounds falling below the ratio against the CELL's background (not
+  /// the widget default — TUIs paint their own backgrounds) are nudged along
+  /// HSL lightness away from the background's luminance until they meet it
+  /// (see [ensureMinimumContrast]). The palette, cell backgrounds, and cells
+  /// styled invisible (deliberate fg == bg) are never modified.
+  final double? minimumContrastRatio;
 
   /// Cursor fill or stroke color, depending on cursor style.
   final Color cursorColor;
@@ -304,6 +419,25 @@ class GhosttyTerminalView extends StatefulWidget {
   /// Callback used when the user activates a hyperlink inside the terminal.
   final Future<void> Function(String uri)? onOpenHyperlink;
 
+  /// Reports the exact (unrounded) cell metrics — character advance width and
+  /// line height in logical pixels — whenever they are recomputed. Hosts use
+  /// this to size a foreign grid to an exact pixel extent (cols × charWidth)
+  /// without the rounding error that `onResize`'s integer `cellWidthPx` carries.
+  final void Function(double charWidth, double linePixels)?
+  onCellMetricsChanged;
+
+  /// Reports a live zoom gesture (touch pinch or trackpad pinch) as a scale
+  /// factor relative to the gesture's start (1.0 = unchanged). The gesture
+  /// handling lives inside this view — not the host — because the host cannot
+  /// win the pointer against the view's recognizer stack (pan / long-press /
+  /// vertical-drag arena claimer) from outside. Null disables pinch handling
+  /// entirely: two-finger behavior is identical to a build without the feature.
+  final ValueChanged<double>? onZoomUpdate;
+
+  /// Called once when an active zoom gesture ends (a pinch finger lifts or the
+  /// trackpad pinch sequence completes). Hosts commit the final factor here.
+  final VoidCallback? onZoomEnd;
+
   @override
   State<GhosttyTerminalView> createState() => _GhosttyTerminalViewState();
 }
@@ -314,8 +448,66 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
   late ScrollController _scrollController;
   late bool _ownsScrollController;
   int _scrollOffsetLines = 0;
+
+  /// Sub-line pixel accumulator for trackpad pan-zoom scrolling. Pan-zoom
+  /// updates arrive in small fractional-line deltas; we accumulate pixels
+  /// here and only emit a `_setScrollOffsetLines` change once the threshold
+  /// crosses a full line, carrying the remainder into the next update.
+  double _panZoomScrollAccumPx = 0;
   int _lastReportedCols = -1;
   int _lastReportedRows = -1;
+
+  /// Last cell pixel metrics pushed through `controller.resize`. Tracked
+  /// separately from cols/rows so a metrics-only change (font size changed but
+  /// the grid dimensions happen to match) still re-syncs the engine's
+  /// cellWidthPx/cellHeightPx instead of leaving them stale.
+  int _lastSyncedCellWidthPx = -1;
+  int _lastSyncedCellHeightPx = -1;
+  double? _lastMetricCharWidth;
+  double? _lastMetricLinePixels;
+
+  /// Latest offset-from-bottom awaiting a single post-frame engine drive.
+  int? _pendingEngineOffset;
+
+  /// True while the view is synchronously driving the engine viewport in
+  /// response to its OWN scroll. `scrollViewportToOffsetFromBottom` notifies
+  /// listeners (`_markDirty`), which re-enters `_onControllerChanged`; without
+  /// this guard, `autoFollowOnActivity` would treat a user scroll as new
+  /// terminal activity and immediately snap back to the bottom — making it
+  /// impossible to scroll up, and oscillating against drag auto-scroll.
+  bool _isDrivingEngineViewport = false;
+
+  /// Mirrors the view's offset-from-bottom intent onto the engine viewport so
+  /// `renderSnapshot` renders the scrolled rows. Coalesced to once per frame:
+  /// `scrollViewportToOffsetFromBottom` reads the engine `scrollbar` (expensive
+  /// for arbitrary pins, PageList.zig:2297) and a fling fires the drive every
+  /// frame, so we stash the target and flush once after the frame.
+  ///
+  /// Consequence: during continuous scrolling the rendered rows can trail the
+  /// scrollbar thumb by one frame, since the engine drive lands after this
+  /// frame's paint. This is an accepted tradeoff of coalescing — the
+  /// alternative (a synchronous drive in the scroll callback) fights Flutter's
+  /// build/layout/paint lifecycle.
+  void _driveEngineViewport(int offsetFromBottom) {
+    final alreadyScheduled = _pendingEngineOffset != null;
+    _pendingEngineOffset = offsetFromBottom;
+    if (alreadyScheduled) {
+      return;
+    }
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final target = _pendingEngineOffset;
+      _pendingEngineOffset = null;
+      if (mounted && target != null) {
+        _isDrivingEngineViewport = true;
+        try {
+          widget.controller.scrollViewportToOffsetFromBottom(target);
+        } finally {
+          _isDrivingEngineViewport = false;
+        }
+      }
+    });
+  }
+
   int _lastVisibleStartLine = 0;
   double _lastMeasuredLinePixels = 1;
   final GhosttyTerminalSelectionSession<GhosttyTerminalSelection>
@@ -327,14 +519,65 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
       _TerminalTextPainterCache(maxEntries: 512);
   final _TerminalTextIntrinsicWidthCache _nativeRunIntrinsicWidthCache =
       _TerminalTextIntrinsicWidthCache(maxEntries: 1024);
+
+  /// (fg ARGB, effective-bg ARGB) → contrast-floored foreground memo for
+  /// [GhosttyTerminalView.minimumContrastRatio]. State-owned (the painter is
+  /// rebuilt every frame) so it survives repaints; cleared wholesale in
+  /// [didUpdateWidget] when the inputs that determine an entry's validity
+  /// change. The ratio itself is NOT part of the key for that same reason.
+  final HashMap<(int, int), Color> _contrastFloorCache =
+      HashMap<(int, int), Color>();
   ContextMenuController? _selectionContextMenuController;
   int _pendingSerialTapCount = 0;
   PointerDeviceKind _lastPointerKind = PointerDeviceKind.mouse;
-  int? _touchScrollPointer;
-  Offset? _lastTouchScrollPosition;
-  double _touchScrollRemainder = 0;
   bool _touchSelectionActive = false;
   bool _touchSelectionHandlesVisible = false;
+
+  // --- Touch → terminal-mouse forwarding (mobile) ---
+  // When the running program has enabled mouse reporting, one finger drives the
+  // TUI the way a mouse drives it on desktop: a tap is a click, a swipe is the
+  // scroll wheel. The button PRESS is deferred to pointer-up so a swipe scrolls
+  // (wheel) instead of registering a spurious click-drag under the finger. A
+  // long-press still selects locally (TUIs never claim long-press), so copy /
+  // send-to-agent keeps working while mouse mode is on. Desktop mice never take
+  // this path — it is gated on `PointerDeviceKind.touch`.
+  //
+  // The plain-scrollback and mouse-forward paths share one active-gesture object
+  // (they never run at once — mouse reporting decides the role). A single owner
+  // is what keeps a second finger from corrupting the tracked finger's state;
+  // see `_TouchGesture`. Null between gestures.
+  _TouchGesture? _active;
+
+  // --- Pinch-to-zoom (touch + trackpad) ---
+  // Fed by the raw Listener, which sees every pointer regardless of gesture
+  // arena — the single-tracked `_TouchGesture` above deliberately ignores a
+  // second finger, so pinch needs its own per-pointer position ledger. Only
+  // populated while `widget.onZoomUpdate` is non-null.
+  final Map<int, Offset> _zoomPointerPositions = <int, Offset>{};
+
+  /// The two pointer ids driving the active touch pinch; null = no pinch.
+  (int, int)? _zoomPinchPointers;
+  double _zoomPinchInitialDistance = 0;
+
+  /// True from the first scaled trackpad pan-zoom update until the gesture
+  /// ends: once a pan-zoom sequence reads as a pinch, its remaining updates
+  /// must not also scroll (a pinch always carries small pan deltas).
+  bool _trackpadZoomActive = false;
+
+  /// Minimum deviation from 1.0 before a pan-zoom sequence latches as a pinch.
+  /// The platform reports a scale on every update, and a two-finger SCROLL
+  /// rides at ~1.0 with incidental drift; an exact `!= 1.0` test would let one
+  /// jittery sample latch zoom mode for the rest of the gesture and kill
+  /// scrolling outright.
+  static const double _trackpadZoomDeadband = 0.01;
+
+  bool get _pinchZoomActive => _zoomPinchPointers != null;
+
+  /// Below this start distance a scale quotient is numerically meaningless
+  /// (two fingers landing on the same spot) — never divide by it.
+  static const double _zoomMinInitialDistance = 1.0;
+
+  bool _touchLongPressSelecting = false;
   _TerminalSelectionHandleEdge? _selectionHandleDragEdge;
   Offset? _lastSelectionHandleDragPosition;
   GhosttyTerminalSelection? _wordSelectionAnchor;
@@ -358,15 +601,161 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
     _pendingSerialTapCount = details.count;
   }
 
+  /// Bridges the platform soft keyboard (IME) to terminal stdin on touch
+  /// devices. Null on desktop/web, where `HardwareKeyboard` already delivers
+  /// physical keys and no on-screen keyboard exists. See
+  /// [_GhosttyTerminalSoftKeyboard] for why a bare [FocusNode] is not enough.
+  _GhosttyTerminalSoftKeyboard? _softKeyboard;
+
+  /// Whether this platform needs the IME bridge to type. A [FocusNode] gaining
+  /// focus wires up `HardwareKeyboard` but never attaches a text-input client,
+  /// so on Android/iOS the on-screen keyboard would otherwise never appear.
+  bool get _needsSoftKeyboard {
+    if (kIsWeb) {
+      return false;
+    }
+    final platform = defaultTargetPlatform;
+    return platform == TargetPlatform.android || platform == TargetPlatform.iOS;
+  }
+
   @override
   void initState() {
     super.initState();
     _focusNode = widget.focusNode ?? FocusNode();
     _ownsFocusNode = widget.focusNode == null;
+    _focusNode.addListener(_handleFocusChangedForSoftKeyboard);
     _scrollController = widget.scrollController ?? ScrollController();
     _ownsScrollController = widget.scrollController == null;
     _scrollController.addListener(_onScrollControllerChanged);
     widget.controller.addListener(_onControllerChanged);
+    if (_needsSoftKeyboard) {
+      _softKeyboard = _GhosttyTerminalSoftKeyboard(
+        onInsert: _writeUserText,
+        onBackspace: _sendBackspace,
+        onEnter: _sendEnter,
+      );
+    }
+    _attachSoftKeyboardController(widget.softKeyboardController);
+    _syncEngineColors();
+  }
+
+  void _attachSoftKeyboardController(
+    GhosttyTerminalSoftKeyboardController? controller,
+  ) {
+    if (controller == null) {
+      return;
+    }
+    controller._show = _showSoftKeyboardExplicitly;
+    controller._hide = () => _softKeyboard?.hide();
+    controller._isVisible = () => _softKeyboard?.isActive ?? false;
+  }
+
+  void _detachSoftKeyboardController(
+    GhosttyTerminalSoftKeyboardController? controller,
+  ) {
+    if (controller == null) {
+      return;
+    }
+    // Ownership check: on a same-frame remount the NEW view's initState runs
+    // before the OLD view's dispose (Flutter finalizes the tree after build),
+    // so an unconditional null here would wipe hooks the replacement just
+    // attached. Only detach what this view attached. (Tear-offs of the same
+    // instance method compare equal, so == identifies our own hook.)
+    if (controller._show == _showSoftKeyboardExplicitly) {
+      controller._show = null;
+      controller._hide = null;
+      controller._isVisible = null;
+    }
+  }
+
+  /// Controller-driven keyboard summon: focus first — the IME connection is
+  /// only attached while the terminal holds focus — then show.
+  void _showSoftKeyboardExplicitly() {
+    if (!_focusNode.hasFocus) {
+      FocusScope.of(context).requestFocus(_focusNode);
+    }
+    _softKeyboard?.show();
+  }
+
+  /// Shows the soft keyboard while the terminal holds focus and hides it when
+  /// focus leaves — the IME connection is only meaningful while the user is
+  /// actually driving this terminal. Auto-show on focus-gain is suppressed
+  /// when the host reserves keyboard summoning for its own affordance
+  /// ([GhosttyTerminalView.showKeyboardOnInteraction] false); hide-on-blur
+  /// always applies so a dismissed terminal never leaves a stale IME up.
+  void _handleFocusChangedForSoftKeyboard() {
+    final keyboard = _softKeyboard;
+    if (keyboard == null) {
+      return;
+    }
+    if (_focusNode.hasFocus) {
+      if (widget.showKeyboardOnInteraction) {
+        keyboard.show();
+      }
+    } else {
+      keyboard.hide();
+    }
+  }
+
+  /// Writes IME-inserted text to the PTY, matching [_handleKey]'s side effects
+  /// (snap to live bottom, drop any active selection) so typed input behaves
+  /// identically whether it arrives from a hardware key or the soft keyboard.
+  void _writeUserText(String text) {
+    _jumpToLiveBottom();
+    if (_selection != null) {
+      _setSelection(null);
+    }
+    widget.controller.write(text);
+  }
+
+  void _sendBackspace() {
+    _jumpToLiveBottom();
+    if (_selection != null) {
+      _setSelection(null);
+    }
+    widget.controller.sendKey(
+      key: GhosttyKey.GHOSTTY_KEY_BACKSPACE,
+      unshiftedCodepoint: 0,
+    );
+  }
+
+  void _sendEnter() {
+    _jumpToLiveBottom();
+    if (_selection != null) {
+      _setSelection(null);
+    }
+    widget.controller.sendKey(
+      key: GhosttyKey.GHOSTTY_KEY_ENTER,
+      unshiftedCodepoint: 0,
+    );
+  }
+
+  /// Pushes the view's color params into the controller's terminal engine so
+  /// the native `renderState` render path resolves ANSI/256 colors against the
+  /// widget's palette instead of the engine's built-in theme.
+  ///
+  /// `expandAnsiToEnginePalette` requires exactly 16 ANSI colors (the
+  /// documented [GhosttyTerminalPalette] contract). This debug assert is the
+  /// enforcement point for that invariant: misuse fails loudly in
+  /// debug/test/CI. In release it degrades gracefully — rather than crashing,
+  /// it skips the engine push for a malformed palette. On web the controller's
+  /// `applyEngineColors` is a no-op.
+  void _syncEngineColors() {
+    final ansi = widget.palette.ansi;
+    if (ansi.length != 16) {
+      assert(
+        false,
+        '_syncEngineColors: palette has ${ansi.length} colors, expected 16; '
+        'skipping.',
+      );
+      return;
+    }
+    widget.controller.applyEngineColors(
+      ansiPalette: ansi,
+      foreground: widget.foregroundColor,
+      background: widget.backgroundColor,
+      cursor: widget.cursorColor,
+    );
   }
 
   @override
@@ -377,7 +766,12 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
       widget.controller.addListener(_onControllerChanged);
       _lastReportedCols = -1;
       _lastReportedRows = -1;
+      _lastSyncedCellWidthPx = -1;
+      _lastSyncedCellHeightPx = -1;
       _scrollOffsetLines = 0;
+      // Abandon any in-flight touch gesture: its remaining moves and deferred
+      // tap belong to the old terminal, not the one being attached.
+      _resetActiveGesture();
       _setSelection(null);
       _removeSelectionContextMenu();
       _touchSelectionHandlesVisible = false;
@@ -387,11 +781,14 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
       _autoScrollSession.reset();
     }
     if (oldWidget.focusNode != widget.focusNode) {
+      _focusNode.removeListener(_handleFocusChangedForSoftKeyboard);
       if (_ownsFocusNode) {
         _focusNode.dispose();
       }
       _focusNode = widget.focusNode ?? FocusNode();
       _ownsFocusNode = widget.focusNode == null;
+      _focusNode.addListener(_handleFocusChangedForSoftKeyboard);
+      _handleFocusChangedForSoftKeyboard();
     }
     if (oldWidget.scrollController != widget.scrollController) {
       _scrollController.removeListener(_onScrollControllerChanged);
@@ -413,17 +810,40 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
         !widget.showSelectionContextMenu) {
       _removeSelectionContextMenu();
     }
+    if (oldWidget.softKeyboardController != widget.softKeyboardController) {
+      _detachSoftKeyboardController(oldWidget.softKeyboardController);
+      _attachSoftKeyboardController(widget.softKeyboardController);
+    }
+    if (oldWidget.palette != widget.palette ||
+        oldWidget.foregroundColor != widget.foregroundColor ||
+        oldWidget.backgroundColor != widget.backgroundColor ||
+        oldWidget.cursorColor != widget.cursorColor ||
+        oldWidget.controller != widget.controller) {
+      _syncEngineColors();
+    }
+    if (oldWidget.minimumContrastRatio != widget.minimumContrastRatio ||
+        oldWidget.palette != widget.palette ||
+        oldWidget.backgroundColor != widget.backgroundColor) {
+      // Entries were floored against the old ratio / default background (a
+      // palette change re-resolves the engine colors the fg keys came from),
+      // so every memoized value may now be wrong — drop them all. Painted-run
+      // TextPainter caches key on the final color, so they self-invalidate.
+      _contrastFloorCache.clear();
+    }
   }
 
   @override
   void dispose() {
     _removeSelectionContextMenu();
     _stopAutoScroll();
+    _detachSoftKeyboardController(widget.softKeyboardController);
+    _softKeyboard?.hide();
     widget.controller.removeListener(_onControllerChanged);
     _scrollController.removeListener(_onScrollControllerChanged);
     if (_ownsScrollController) {
       _scrollController.dispose();
     }
+    _focusNode.removeListener(_handleFocusChangedForSoftKeyboard);
     if (_ownsFocusNode) {
       _focusNode.dispose();
     }
@@ -441,7 +861,7 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
         onSelectionContentChanged: widget.onSelectionContentChanged,
       );
     }
-    if (widget.autoFollowOnActivity) {
+    if (widget.autoFollowOnActivity && !_isDrivingEngineViewport) {
       _jumpToLiveBottom();
     }
     setState(() {});
@@ -459,6 +879,15 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
     setState(() {
       _scrollOffsetLines = nextOffsetLines;
     });
+    _driveEngineViewport(nextOffsetLines);
+  }
+
+  bool _resetScrollOffsetToBottom() {
+    setState(() {
+      _scrollOffsetLines = 0;
+    });
+    _driveEngineViewport(0);
+    return true;
   }
 
   bool _jumpToLiveBottom() {
@@ -468,19 +897,13 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
         return true;
       }
       if (_scrollOffsetLines != 0) {
-        setState(() {
-          _scrollOffsetLines = 0;
-        });
-        return true;
+        return _resetScrollOffsetToBottom();
       }
       return false;
     }
 
     if (_scrollOffsetLines != 0) {
-      setState(() {
-        _scrollOffsetLines = 0;
-      });
-      return true;
+      return _resetScrollOffsetToBottom();
     }
     return false;
   }
@@ -536,7 +959,36 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
     final character = ghosttyTerminalPrintableText(event, modifiers: modifiers);
     final controlText = ghosttyTerminalControlText(event, modifiers: modifiers);
 
+    // When the IME soft-keyboard bridge is attached (mobile), the platform
+    // delivers plain text and Enter through the input connection (see
+    // [_GhosttyTerminalSoftKeyboard]). A hardware/Bluetooth keyboard also
+    // surfaces those as raw KeyEvents here, so handling both paths would type
+    // every character twice. Defer them to the IME; keep control chords,
+    // navigation/function keys, and copy/paste shortcuts (which the IME does
+    // not deliver). The whole guard is inert on desktop/web where
+    // `_softKeyboard` is null.
+    //
+    // Backspace is deliberately NOT deferred. IMEs (Gboard/LatinIME) often
+    // send backspace as a bare KEYCODE_DEL key event instead of
+    // deleteSurroundingText, and the engine's InputConnectionAdaptor fallback
+    // has no KEYCODE_DEL case (getUnicodeChar() is 0 → returns false), so a
+    // deferred backspace is dropped on the floor — nothing ever reaches the
+    // editable to produce a deletion delta. The two backspace channels are
+    // mutually exclusive per press (an IME either edits the editable, which
+    // dispatches no KeyEvent, or sends the key event, which never touches the
+    // editable), so handling the raw event here cannot double-delete. Enter
+    // differs: the engine fallback DOES translate KEYCODE_ENTER into a "\n"
+    // insertion on a multiline field, so deferring it delivers exactly once.
+    final imeOwnsText = _softKeyboard?.isActive ?? false;
+    final plainChord =
+        !modifiers.controlPressed &&
+        !modifiers.altPressed &&
+        !modifiers.metaPressed;
+
     if (key != null) {
+      if (imeOwnsText && plainChord && key == GhosttyKey.GHOSTTY_KEY_ENTER) {
+        return KeyEventResult.ignored;
+      }
       _jumpToLiveBottom();
       if (_selection != null) {
         _setSelection(null);
@@ -556,6 +1008,9 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
     }
 
     if (character.isNotEmpty) {
+      if (imeOwnsText) {
+        return KeyEventResult.ignored;
+      }
       _jumpToLiveBottom();
       if (_selection != null) {
         _setSelection(null);
@@ -604,7 +1059,6 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
   String _resolveSelectionText(GhosttyTerminalSelection selection) {
     final renderSnapshot = widget.controller.renderSnapshot;
     if (widget.renderer == GhosttyTerminalRendererMode.renderState &&
-        _scrollOffsetLines == 0 &&
         renderSnapshot != null &&
         renderSnapshot.hasViewportData) {
       return _renderSnapshotTextForSelection(
@@ -623,7 +1077,6 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
   String? _resolveHyperlinkUriAt(GhosttyTerminalCellPosition position) {
     final renderSnapshot = widget.controller.renderSnapshot;
     if (widget.renderer == GhosttyTerminalRendererMode.renderState &&
-        _scrollOffsetLines == 0 &&
         renderSnapshot != null &&
         renderSnapshot.hasViewportData) {
       final uri = _renderSnapshotHyperlinkAt(
@@ -643,7 +1096,6 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
   ) {
     final renderSnapshot = widget.controller.renderSnapshot;
     if (widget.renderer == GhosttyTerminalRendererMode.renderState &&
-        _scrollOffsetLines == 0 &&
         renderSnapshot != null &&
         renderSnapshot.hasViewportData) {
       return _renderSnapshotWordSelectionAt(
@@ -659,13 +1111,17 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
     );
   }
 
+  // [walkWrapChain] false selects only the given visual rows (touch long-press);
+  // true grows the span across the soft-wrapped logical line (desktop line
+  // selection). The non-render snapshot path already selects only the given
+  // rows, so it ignores the flag.
   GhosttyTerminalSelection? _resolveLineSelectionBetweenRows(
     int baseRow,
-    int extentRow,
-  ) {
+    int extentRow, {
+    bool walkWrapChain = true,
+  }) {
     final renderSnapshot = widget.controller.renderSnapshot;
     if (widget.renderer == GhosttyTerminalRendererMode.renderState &&
-        _scrollOffsetLines == 0 &&
         renderSnapshot != null &&
         renderSnapshot.hasViewportData) {
       return _renderSnapshotLineSelectionBetweenRows(
@@ -673,6 +1129,7 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
         baseRow,
         extentRow,
         viewportStartLine: _lastVisibleStartLine,
+        walkWrapChain: walkWrapChain,
       );
     }
     return widget.controller.snapshot.lineSelectionBetweenRows(
@@ -856,8 +1313,9 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
     }
 
     final isMultiLine = normalized.start.row != normalized.end.row;
-    final contentLeft = widget.padding.left;
-    final contentRight = size.width - widget.padding.right;
+    final effPadding = _effectivePadding(size, metrics);
+    final contentLeft = effPadding.left;
+    final contentRight = size.width - effPadding.right;
     final left = isMultiLine
         ? contentLeft
         : contentLeft + normalized.start.col * metrics.charWidth;
@@ -896,11 +1354,13 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
 
     final start = _selectionEndpointOffset(
       _TerminalSelectionHandleEdge.start,
+      size,
       metrics,
       viewport,
     );
     final end = _selectionEndpointOffset(
       _TerminalSelectionHandleEdge.end,
+      size,
       metrics,
       viewport,
     );
@@ -983,6 +1443,7 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
 
   Offset? _selectionEndpointOffset(
     _TerminalSelectionHandleEdge edge,
+    Size size,
     _TerminalMetrics metrics,
     _TerminalViewport viewport,
   ) {
@@ -998,10 +1459,11 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
       return null;
     }
 
+    final effPadding = _effectivePadding(size, metrics);
     final rawX = edge == _TerminalSelectionHandleEdge.start
-        ? widget.padding.left + position.col * metrics.charWidth
-        : widget.padding.left + (position.col + 1) * metrics.charWidth;
-    final minX = widget.padding.left;
+        ? effPadding.left + position.col * metrics.charWidth
+        : effPadding.left + (position.col + 1) * metrics.charWidth;
+    final minX = effPadding.left;
     final maxX = math.max(minX, _lastReportedCols * metrics.charWidth + minX);
     final y =
         viewport.contentTop +
@@ -1087,16 +1549,45 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
     final painter = TextPainter(
       text: TextSpan(
         text: 'W',
+        // Measure at the weight ordinary cells actually paint at. A monospace
+        // family should advance identically across weights, but a synthesized
+        // or badly-mastered one need not — measuring at a weight we never draw
+        // would size every cell against a glyph that is never rendered.
         style: _terminalTextStyle(
           fontSize: widget.fontSize,
           lineHeight: widget.lineHeight,
+          fontWeight: widget.fontWeight,
         ),
       ),
       textDirection: TextDirection.ltr,
     )..layout();
+
+    // The font's natural monospace advance (including the base letterSpacing).
+    final rawCharWidth = math.max(1.0, painter.width * widget.cellWidthScale);
+    final rawLinePixels = math.max(1.0, widget.fontSize * widget.lineHeight);
+
+    // Snap the cell to whole physical pixels so EVERY cell is identical and
+    // aligned to the pixel grid — the same fixed-integer cell ghostty uses for
+    // its sprite glyphs. A fractional cell (e.g. 8.4px) snapped per-edge yields
+    // columns that alternate 8/9px, which distorts block/box glyphs and
+    // half-block pixel art (TUI logos, charts). Rows get the same treatment.
+    final dpr = MediaQuery.devicePixelRatioOf(context);
+    final charWidth = _snapLogicalExtentToPhysical(rawCharWidth, dpr);
+    final linePixels = _snapLogicalExtentToPhysical(rawLinePixels, dpr);
+
+    // Because the cell is now snapped but the font advance is not, compensate
+    // with letterSpacing so a run still advances exactly one cell per glyph and
+    // text stays locked to the grid. Compensate against the unscaled glyph
+    // advance (`painter.width`), NOT `rawCharWidth` — `rawCharWidth` folds in
+    // `cellWidthScale`, but the font itself advances by `painter.width`
+    // regardless of the cell scale, so using `rawCharWidth` would mis-space
+    // text whenever `cellWidthScale != 1`.
+    final letterSpacing = widget.letterSpacing + (charWidth - painter.width);
+
     return _TerminalMetrics(
-      charWidth: math.max(1, painter.width * widget.cellWidthScale),
-      linePixels: math.max(1, widget.fontSize * widget.lineHeight),
+      charWidth: charWidth,
+      linePixels: linePixels,
+      letterSpacing: letterSpacing,
     );
   }
 
@@ -1128,6 +1619,63 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
 
   double get _headerHeight => widget.showHeader ? _terminalHeaderHeight : 0;
 
+  /// Returns [GhosttyTerminalView.padding] with the floor-rounding remainder
+  /// distributed across the four edges according to [GhosttyTerminalView.cellAlignment].
+  ///
+  /// The cell grid is always laid out as `floor(content / cellSize)` whole
+  /// cells, leaving a sub-cell remainder. By default ([Alignment.topLeft])
+  /// that remainder lives on the right/bottom edges; [Alignment.center]
+  /// splits it equally on all sides, etc. All downstream geometry
+  /// (painter, viewport, pointer-to-cell, mouse-encoder padding) reads
+  /// through this helper so cell→pixel mapping stays consistent with where
+  /// the grid is actually painted. Cell-count computation in [_syncGrid]
+  /// still uses the original [widget.padding] — the remainder is derived
+  /// *from* that count, not the other way around.
+  EdgeInsets _effectivePadding(Size size, _TerminalMetrics metrics) {
+    final align = widget.cellAlignment;
+    if (align.x == -1 && align.y == -1) {
+      return widget.padding; // topLeft fast-path
+    }
+    final contentWidth = size.width - widget.padding.horizontal;
+    final contentHeight = size.height - _headerHeight - widget.padding.vertical;
+    if (contentWidth <= 0 || contentHeight <= 0) return widget.padding;
+    final cols = math.max(1, (contentWidth / metrics.charWidth).floor());
+    final rows = math.max(1, (contentHeight / metrics.linePixels).floor());
+    final slopX = math.max(0.0, contentWidth - cols * metrics.charWidth);
+    final slopY = math.max(0.0, contentHeight - rows * metrics.linePixels);
+    // Alignment uses -1..1; convert to a 0..1 fraction for the leading edge,
+    // then floor to whole logical pixels. Two reasons the leading edges
+    // MUST be integer-valued:
+    //
+    //   1. The painter draws cell origins at `padding.left + col*charWidth`
+    //      and `padding.top + row*linePixels`. A non-integer leading edge
+    //      forces every glyph onto a half-pixel grid; the rasterizer then
+    //      spreads each stroke across two device pixels (visibly blurry
+    //      text — defeating the whole point of a monospace cell grid).
+    //
+    //   2. `_mouseEncoderSize` rounds each edge independently before
+    //      sending to the native side. If leading + trailing each carry a
+    //      .5, both round up and the integer sum overshoots `slopX` by
+    //      1px, making the native hit-tester report col+1 along the
+    //      rightmost cell column (and similarly for the bottom row).
+    //      Flooring the leading edge keeps `slopX - extraLeft` whatever
+    //      it needs to be for an exact sum; when `widget.padding` edges
+    //      are integers (the common case), the .round() calls in
+    //      `_mouseEncoderSize` are no-ops.
+    //
+    // The trailing edges absorb the fractional remainder; they only feed
+    // subtractive arithmetic (contentHeight/Width, mouse-encoder padding),
+    // never a paint origin, so non-integer values there are harmless.
+    final extraLeft = (slopX * (align.x + 1) / 2).floorToDouble();
+    final extraTop = (slopY * (align.y + 1) / 2).floorToDouble();
+    return EdgeInsets.fromLTRB(
+      widget.padding.left + extraLeft,
+      widget.padding.top + extraTop,
+      widget.padding.right + (slopX - extraLeft),
+      widget.padding.bottom + (slopY - extraTop),
+    );
+  }
+
   void _syncGrid(Size size, _TerminalMetrics metrics) {
     final contentWidth = size.width - widget.padding.horizontal;
     final contentHeight = size.height - _headerHeight - widget.padding.vertical;
@@ -1135,14 +1683,37 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
       return;
     }
 
+    if (metrics.charWidth != _lastMetricCharWidth ||
+        metrics.linePixels != _lastMetricLinePixels) {
+      _lastMetricCharWidth = metrics.charWidth;
+      _lastMetricLinePixels = metrics.linePixels;
+      final cb = widget.onCellMetricsChanged;
+      if (cb != null) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) cb(metrics.charWidth, metrics.linePixels);
+        });
+      }
+    }
+
     final cols = math.max(1, (contentWidth / metrics.charWidth).floor());
     final rows = math.max(1, (contentHeight / metrics.linePixels).floor());
-    if (cols == _lastReportedCols && rows == _lastReportedRows) {
+    final cellWidthPx = metrics.charWidth.round();
+    final cellHeightPx = metrics.linePixels.round();
+    // Skip only when cols, rows, AND the cell pixel metrics all match the last
+    // sync — a font-size change can leave the grid dimensions unchanged while
+    // the engine's cellWidthPx/cellHeightPx (pixel-size reports, CSI 14 t) go
+    // stale.
+    if (cols == _lastReportedCols &&
+        rows == _lastReportedRows &&
+        cellWidthPx == _lastSyncedCellWidthPx &&
+        cellHeightPx == _lastSyncedCellHeightPx) {
       return;
     }
 
     _lastReportedCols = cols;
     _lastReportedRows = rows;
+    _lastSyncedCellWidthPx = cellWidthPx;
+    _lastSyncedCellHeightPx = cellHeightPx;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) {
         return;
@@ -1150,8 +1721,8 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
       widget.controller.resize(
         cols: cols,
         rows: rows,
-        cellWidthPx: metrics.charWidth.round(),
-        cellHeightPx: metrics.linePixels.round(),
+        cellWidthPx: cellWidthPx,
+        cellHeightPx: cellHeightPx,
       );
     });
   }
@@ -1170,23 +1741,7 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
       if (!scrollUp && event.scrollDelta.dy <= 0) {
         return;
       }
-      final button = scrollUp
-          ? GhosttyMouseButton.GHOSTTY_MOUSE_BUTTON_FOUR
-          : GhosttyMouseButton.GHOSTTY_MOUSE_BUTTON_FIVE;
-      _sendMouseEvent(
-        GhosttyMouseAction.GHOSTTY_MOUSE_ACTION_PRESS,
-        event,
-        size,
-        metrics,
-        button: button,
-      );
-      _sendMouseEvent(
-        GhosttyMouseAction.GHOSTTY_MOUSE_ACTION_RELEASE,
-        event,
-        size,
-        metrics,
-        button: button,
-      );
+      _sendWheelStep(event, size, metrics, up: scrollUp);
       return;
     }
 
@@ -1198,16 +1753,97 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
     _setScrollOffsetLines(_scrollOffsetLines - deltaLines, size, metrics);
   }
 
+  // One wheel "notch" as a mouse button 4/5 press+release at `event`'s location.
+  // `up` → button 4 (scroll up into history), else button 5. Shared by the real
+  // wheel (`_handlePointerSignal`) and touch-swipe→wheel
+  // (`_onTouchMousePointerMove`) so the two encodings can't drift.
+  void _sendWheelStep(
+    PointerEvent event,
+    Size size,
+    _TerminalMetrics metrics, {
+    required bool up,
+  }) {
+    final button = up
+        ? GhosttyMouseButton.GHOSTTY_MOUSE_BUTTON_FOUR
+        : GhosttyMouseButton.GHOSTTY_MOUSE_BUTTON_FIVE;
+    _sendMouseEvent(
+      GhosttyMouseAction.GHOSTTY_MOUSE_ACTION_PRESS,
+      event,
+      size,
+      metrics,
+      button: button,
+    );
+    _sendMouseEvent(
+      GhosttyMouseAction.GHOSTTY_MOUSE_ACTION_RELEASE,
+      event,
+      size,
+      metrics,
+      button: button,
+    );
+  }
+
+  void _handlePointerPanZoomStart(PointerPanZoomStartEvent event) {
+    _panZoomScrollAccumPx = 0;
+    _trackpadZoomActive = false;
+    _requestTerminalFocus();
+  }
+
+  /// Trackpad two-finger pan. Pan deltas follow finger motion, which is the
+  /// opposite sign convention from `PointerScrollEvent.scrollDelta` — so we
+  /// add (rather than subtract) the line delta to keep content tracking the
+  /// fingers (fingers down = scroll toward live bottom = offset decreases;
+  /// fingers up = scroll back into history = offset increases).
+  ///
+  /// Mouse-reporting forwarding is intentionally skipped: SGR/xterm mouse
+  /// protocol has no pan-zoom encoding (only wheel buttons 4/5 / 6/7), so
+  /// pan-zoom is silently dropped when the TUI has mouse reporting on. This
+  /// matches iTerm2 / Terminal.app behavior.
+  void _handlePointerPanZoomUpdate(
+    PointerPanZoomUpdateEvent event,
+    Size size,
+    _TerminalMetrics metrics,
+  ) {
+    // A scaled update marks the whole gesture as a pinch: report the
+    // cumulative `event.scale` (already relative to gesture start) and stop
+    // treating the sequence as scroll — a pinch always carries incidental pan
+    // deltas, and letting them through would scroll while zooming.
+    if (widget.onZoomUpdate != null &&
+        (_trackpadZoomActive ||
+            (event.scale - 1.0).abs() > _trackpadZoomDeadband)) {
+      if (!_trackpadZoomActive) {
+        _trackpadZoomActive = true;
+        _setSelection(null);
+      }
+      widget.onZoomUpdate!(event.scale);
+      return;
+    }
+    if (_terminalMouseReportingEnabled) return;
+    _panZoomScrollAccumPx += event.panDelta.dy;
+    final deltaLines = (_panZoomScrollAccumPx / metrics.linePixels).truncate();
+    if (deltaLines == 0) return;
+    _panZoomScrollAccumPx -= deltaLines * metrics.linePixels;
+    _setScrollOffsetLines(_scrollOffsetLines + deltaLines, size, metrics);
+  }
+
+  void _handlePointerPanZoomEnd(PointerPanZoomEndEvent event) {
+    _panZoomScrollAccumPx = 0;
+    if (_trackpadZoomActive) {
+      _trackpadZoomActive = false;
+      widget.onZoomEnd?.call();
+    }
+  }
+
   VtMouseEncoderSize _mouseEncoderSize(Size size, _TerminalMetrics metrics) {
+    final effPadding = _effectivePadding(size, metrics);
     return VtMouseEncoderSize(
       screenWidth: math.max(1, size.width.round()),
       screenHeight: math.max(1, (size.height - _headerHeight).round()),
       cellWidth: math.max(1, metrics.charWidth.round()),
       cellHeight: math.max(1, metrics.linePixels.round()),
-      paddingTop: widget.padding.top.round(),
-      paddingBottom: widget.padding.bottom.round(),
-      paddingRight: widget.padding.right.round(),
-      paddingLeft: widget.padding.left.round(),
+      paddingTop: effPadding.top.round(),
+      paddingBottom: effPadding.bottom.round(),
+      paddingRight: effPadding.right.round(),
+      paddingLeft: effPadding.left.round(),
     );
   }
 
@@ -1305,9 +1941,18 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
     if (!_terminalMouseReportingEnabled) {
       return false;
     }
-    return kind != PointerDeviceKind.touch ||
-        widget.interactionPolicy ==
-            GhosttyTerminalInteractionPolicy.terminalMouseFirst;
+    if (kind != PointerDeviceKind.touch) {
+      return true;
+    }
+    // Touch drives the TUI whenever the program actually asked for the mouse.
+    // `terminalMouseFirst` always reports; `auto` reaches here only when a
+    // mouse mode is live (see `_terminalMouseReportingEnabled`), so touch taps
+    // become clicks and swipes become wheel scroll on mobile — matching how a
+    // full-screen agent (Claude Code, opencode) expects to be driven.
+    // `selectionFirst` never forwards touch.
+    return widget.interactionPolicy ==
+            GhosttyTerminalInteractionPolicy.terminalMouseFirst ||
+        widget.interactionPolicy == GhosttyTerminalInteractionPolicy.auto;
   }
 
   bool get _currentPointerUsesTerminalMouse =>
@@ -1330,20 +1975,26 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
     Size size,
     _TerminalMetrics metrics, {
     GhosttyMouseButton? button,
+    Offset? positionOverride,
   }) {
     if (!_terminalMouseReportingCapturesPointerKind(event.kind)) {
       return;
     }
 
+    // Deferred touch clicks report the down location, not the release point:
+    // a tap can drift up to `kTouchSlop` before lifting, and the cell the user
+    // aimed at is where the finger landed. Same coordinate space as
+    // `event.localPosition`.
+    final localPosition = positionOverride ?? event.localPosition;
     final terminalLocalY = math.max<double>(
       0,
-      event.localPosition.dy - _headerHeight,
+      localPosition.dy - _headerHeight,
     );
     widget.controller.sendMouse(
       action: action,
       button: _mouseButtonForEvent(action, event, button),
       mods: GhosttyTerminalModifierState.fromHardwareKeyboard().ghosttyMask,
-      position: VtMousePosition(x: event.localPosition.dx, y: terminalLocalY),
+      position: VtMousePosition(x: localPosition.dx, y: terminalLocalY),
       size: _mouseEncoderSize(size, metrics),
       trackingMode: _terminalMouseTrackingMode,
       format: _terminalMouseFormat,
@@ -1352,21 +2003,31 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
     );
   }
 
+  /// Total scrollable lines for extent/scrollbar math. Prefers the engine's
+  /// native scrollback total (so rows beyond the formatter `maxLines` cap stay
+  /// reachable); falls back to the formatter snapshot when the engine viewport
+  /// geometry is unavailable (e.g. before the terminal exists).
+  int _scrollableLineCount() {
+    final bar = widget.controller.viewportScrollbar;
+    if (bar != null) {
+      return bar.total;
+    }
+    return widget.controller.snapshot.lines.length;
+  }
+
   int _maxScrollOffset(Size size, _TerminalMetrics metrics) {
     final viewport = _viewportFor(size, metrics);
-    return math.max(
-      0,
-      widget.controller.snapshot.lines.length - viewport.maxVisible,
-    );
+    return math.max(0, _scrollableLineCount() - viewport.maxVisible);
   }
 
   _TerminalViewport _viewportFor(Size size, _TerminalMetrics metrics) {
-    final contentTop = _headerHeight + widget.padding.top;
-    final contentHeight = size.height - contentTop - widget.padding.bottom;
+    final effPadding = _effectivePadding(size, metrics);
+    final contentTop = _headerHeight + effPadding.top;
+    final contentHeight = size.height - contentTop - effPadding.bottom;
     final maxVisible = contentHeight <= 0
         ? 1
         : math.max(1, (contentHeight / metrics.linePixels).floor());
-    final lineCount = widget.controller.snapshot.lines.length;
+    final lineCount = _scrollableLineCount();
     final maxOffset = math.max(0, lineCount - maxVisible);
     final offset = _scrollOffsetLines.clamp(0, maxOffset);
     final end = math.max(0, lineCount - offset);
@@ -1394,6 +2055,7 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
             _scrollOffsetLines = clamped;
           });
         }
+        _driveEngineViewport(clamped);
         return;
       }
       _scrollController.jumpTo(clampedPixels);
@@ -1402,6 +2064,7 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
     setState(() {
       _scrollOffsetLines = clamped;
     });
+    _driveEngineViewport(clamped);
   }
 
   Widget _buildScrollLayer(
@@ -1434,7 +2097,7 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
     _TerminalMetrics metrics,
     _TerminalViewport viewport,
   ) {
-    final lineCount = widget.controller.snapshot.lines.length;
+    final lineCount = _scrollableLineCount();
     final maxOffset = _maxScrollOffset(size, metrics);
     if (!widget.showVerticalScrollbar ||
         viewport.contentHeight <= 0 ||
@@ -1527,8 +2190,9 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
       return null;
     }
 
-    final minX = widget.padding.left;
-    final maxX = size.width - widget.padding.right;
+    final effPadding = _effectivePadding(size, metrics);
+    final minX = effPadding.left;
+    final maxX = size.width - effPadding.right;
     final minY = viewport.contentTop;
     final maxY = viewport.contentTop + viewport.contentHeight;
     if (!clampToViewport &&
@@ -1547,11 +2211,9 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
         : localPosition.dy;
     final lineIndex = ((resolvedY - viewport.contentTop) / metrics.linePixels)
         .floor();
-    final row = (viewport.startLine + lineIndex).clamp(
-      0,
-      widget.controller.snapshot.lines.length - 1,
-    );
-    final col = ((resolvedX - widget.padding.left) / metrics.charWidth).floor();
+    final maxRow = math.max(0, _scrollableLineCount() - 1);
+    final row = (viewport.startLine + lineIndex).clamp(0, maxRow).toInt();
+    final col = ((resolvedX - effPadding.left) / metrics.charWidth).floor();
     final maxCol = math.max(0, widget.controller.cols - 1);
     return GhosttyTerminalCellPosition(row: row, col: col.clamp(0, maxCol));
   }
@@ -1687,6 +2349,17 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
                       lineSelectionAnchorRow,
                       position.row,
                     ),
+            _TerminalSelectionGranularity.visualRow =>
+              lineSelectionAnchorRow == null
+                  ? GhosttyTerminalSelection(
+                      base: current.base,
+                      extent: position,
+                    )
+                  : _resolveLineSelectionBetweenRows(
+                      lineSelectionAnchorRow,
+                      position.row,
+                      walkWrapChain: false,
+                    ),
           }
         : _selectionForHandleDragPosition(position);
     if (nextSelection == null) {
@@ -1697,6 +2370,7 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
     setState(() {
       _scrollOffsetLines = nextOffset;
     });
+    _driveEngineViewport(nextOffset);
     _selectionSession.updateSelection(nextSelection);
     ghosttyTerminalNotifySelectionChange<GhosttyTerminalSelection>(
       previousSelection: previousSelection,
@@ -1737,6 +2411,14 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
     if (widget.focusOnInteraction && !_focusNode.hasFocus) {
       FocusScope.of(context).requestFocus(_focusNode);
     }
+    // Re-assert the soft keyboard on every interaction, not just focus-gain:
+    // dismissing it (Android Back) closes the IME connection while the terminal
+    // keeps focus, so a plain focus-change listener would never bring it back
+    // on the next tap. Skipped when the host owns keyboard summoning
+    // (showKeyboardOnInteraction false) — taps then scroll/select only.
+    if (widget.showKeyboardOnInteraction && _focusNode.hasFocus) {
+      _softKeyboard?.show();
+    }
   }
 
   bool _touchPointerShouldScroll(PointerEvent event) {
@@ -1745,13 +2427,121 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
         !_terminalMouseReportingCapturesPointerKind(event.kind);
   }
 
-  void _startTouchScroll(PointerDownEvent event) {
-    if (!_touchPointerShouldScroll(event)) {
+  // Where a new touch gesture's arena outcome starts. In `scroll` drag-behavior
+  // the vertical arena-claimer is installed and decides the outcome, so we begin
+  // `unresolved` and forward nothing until it wins. In `selection` drag-behavior
+  // no claimer exists — nothing to wait for — so begin `won`.
+  _TouchArenaOutcome get _initialArenaOutcome =>
+      widget.touchDragBehavior == GhosttyTerminalTouchDragBehavior.scroll
+      ? _TouchArenaOutcome.unresolved
+      : _TouchArenaOutcome.won;
+
+  // The tracked gesture iff it matches this event's pointer and the expected
+  // role, else null — the guard every touch handler opens with. (Selection
+  // suppression via `_touchSelectionActive` is checked separately by the two
+  // move handlers.)
+  _TouchGesture? _activeFor(PointerEvent event, _TouchGestureRole role) {
+    final gesture = _active;
+    if (gesture == null ||
+        gesture.pointer != event.pointer ||
+        gesture.role != role) {
+      return null;
+    }
+    return gesture;
+  }
+
+  // Drop the tracked gesture and reopen the selection guards. The single reset
+  // for every gesture end (scroll or mouse-forward) and lifecycle teardown, so
+  // the two never disagree on what "no active gesture" means.
+  void _resetActiveGesture() {
+    _active = null;
+    _touchSelectionActive = false;
+  }
+
+  // --- Touch pinch-to-zoom ---
+  // Runs off the raw Listener like the scroll/mouse-forward paths, NOT a
+  // ScaleGestureRecognizer: a recognizer would enter the arena against the
+  // view's own pan/long-press/vertical-drag recognizers and the host app's
+  // horizontal pager, and any winner breaks somebody. The Listener sees both
+  // fingers unconditionally, so a pinch can be derived without arena stakes.
+
+  void _pinchZoomPointerDown(PointerDownEvent event) {
+    if (widget.onZoomUpdate == null || event.kind != PointerDeviceKind.touch) {
       return;
     }
-    _touchScrollPointer = event.pointer;
-    _lastTouchScrollPosition = event.localPosition;
-    _touchScrollRemainder = 0;
+    _zoomPointerPositions[event.pointer] = event.position;
+    if (_pinchZoomActive || _zoomPointerPositions.length != 2) {
+      return;
+    }
+    final ids = _zoomPointerPositions.keys.toList();
+    final distance =
+        (_zoomPointerPositions[ids[0]]! - _zoomPointerPositions[ids[1]]!)
+            .distance;
+    if (distance < _zoomMinInitialDistance) {
+      return;
+    }
+    _zoomPinchPointers = (ids[0], ids[1]);
+    _zoomPinchInitialDistance = distance;
+    // The pinch owns both fingers now: drop the single-finger gesture the
+    // first finger started (scroll or mouse-forward), abandon a long-press in
+    // flight, and clear any selection so the pinch doesn't drag-extend it.
+    _resetActiveGesture();
+    _touchLongPressSelecting = false;
+    _stopAutoScroll();
+    _setSelection(null);
+  }
+
+  void _pinchZoomPointerMove(PointerMoveEvent event) {
+    if (widget.onZoomUpdate == null || event.kind != PointerDeviceKind.touch) {
+      return;
+    }
+    if (!_zoomPointerPositions.containsKey(event.pointer)) {
+      return;
+    }
+    _zoomPointerPositions[event.pointer] = event.position;
+    final pinch = _zoomPinchPointers;
+    if (pinch == null ||
+        (event.pointer != pinch.$1 && event.pointer != pinch.$2)) {
+      return;
+    }
+    final a = _zoomPointerPositions[pinch.$1];
+    final b = _zoomPointerPositions[pinch.$2];
+    if (a == null || b == null) {
+      return;
+    }
+    final scale = (a - b).distance / _zoomPinchInitialDistance;
+    if (!scale.isFinite) {
+      return;
+    }
+    widget.onZoomUpdate!(scale);
+  }
+
+  void _pinchZoomPointerUpOrCancel(PointerEvent event) {
+    if (event.kind != PointerDeviceKind.touch) {
+      return;
+    }
+    _zoomPointerPositions.remove(event.pointer);
+    final pinch = _zoomPinchPointers;
+    if (pinch == null ||
+        (event.pointer != pinch.$1 && event.pointer != pinch.$2)) {
+      return;
+    }
+    _zoomPinchPointers = null;
+    _zoomPinchInitialDistance = 0;
+    widget.onZoomEnd?.call();
+  }
+
+  void _startTouchScroll(PointerDownEvent event) {
+    // Single-finger: a second finger must not replace the tracked gesture.
+    if (_active != null || !_touchPointerShouldScroll(event)) {
+      return;
+    }
+    _active = _TouchGesture(
+      pointer: event.pointer,
+      role: _TouchGestureRole.scroll,
+      start: event.localPosition,
+      arenaOutcome: _initialArenaOutcome,
+    );
     _touchSelectionActive = false;
   }
 
@@ -1760,34 +2550,146 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
     Size size,
     _TerminalMetrics metrics,
   ) {
-    if (event.pointer != _touchScrollPointer || _touchSelectionActive) {
+    final gesture = _activeFor(event, _TouchGestureRole.scroll);
+    if (gesture == null || _touchSelectionActive) {
       return;
     }
 
-    final previous = _lastTouchScrollPosition;
-    _lastTouchScrollPosition = event.localPosition;
-    if (previous == null) {
+    // Stop scrollback the moment the arena is lost to an ancestor horizontal
+    // pager (diagonal swipe → page flip only). Local scrollback stays responsive
+    // before the arena resolves — unlike the mouse-forward wheel path, a stray
+    // line of local scroll never reaches the running program.
+    final previous = gesture.lastPosition;
+    gesture.lastPosition = event.localPosition;
+    if (gesture.arenaOutcome == _TouchArenaOutcome.lost) {
       return;
     }
 
-    final delta = event.localPosition.dy - previous.dy + _touchScrollRemainder;
+    final delta =
+        event.localPosition.dy - previous.dy + gesture.scrollRemainder;
     final deltaLines = (delta / metrics.linePixels).truncate();
-    _touchScrollRemainder = delta - deltaLines * metrics.linePixels;
+    gesture.scrollRemainder = delta - deltaLines * metrics.linePixels;
     if (deltaLines == 0) {
       return;
     }
 
-    _setScrollOffsetLines(_scrollOffsetLines - deltaLines, size, metrics);
+    _setScrollOffsetLines(_scrollOffsetLines + deltaLines, size, metrics);
   }
 
   void _endTouchScroll(PointerEvent event) {
-    if (event.pointer != _touchScrollPointer) {
+    if (_activeFor(event, _TouchGestureRole.scroll) == null) {
       return;
     }
-    _touchScrollPointer = null;
-    _lastTouchScrollPosition = null;
-    _touchScrollRemainder = 0;
-    _touchSelectionActive = false;
+    _resetActiveGesture();
+  }
+
+  // --- Touch → terminal-mouse forwarding ---
+  // Active only while a running program has mouse reporting on (see
+  // `_terminalMouseReportingCapturesPointerKind`). Otherwise these are no-ops
+  // and the plain-scrollback path (`_startTouchScroll`) owns the finger.
+
+  void _onTouchMousePointerDown(PointerDownEvent event) {
+    if (!_terminalMouseReportingCapturesPointerKind(PointerDeviceKind.touch)) {
+      return;
+    }
+    // Single-finger gesture: a second finger landing mid-swipe must not hijack
+    // the tracked pointer (which would discard the in-progress wheel state).
+    if (_active != null) {
+      return;
+    }
+    _active = _TouchGesture(
+      pointer: event.pointer,
+      role: _TouchGestureRole.mouseForward,
+      start: event.localPosition,
+      arenaOutcome: _initialArenaOutcome,
+      tapPending: true,
+    );
+  }
+
+  void _onTouchMousePointerMove(
+    PointerMoveEvent event,
+    Size size,
+    _TerminalMetrics metrics,
+  ) {
+    // Back off when this isn't our tracked mouse-forward finger, or a long-press
+    // grabbed the selection.
+    final gesture = _activeFor(event, _TouchGestureRole.mouseForward);
+    if (gesture == null || _touchSelectionActive) {
+      return;
+    }
+    // Resolve tap-vs-swipe by travel FIRST, before any arena short-circuit: a
+    // finger past `kTouchSlop` is a swipe regardless of who won the arena.
+    // Otherwise a horizontal page-flip swipe (which loses the arena) would keep
+    // `tapPending` set and fire a phantom click on lift.
+    if (gesture.tapPending) {
+      if ((event.localPosition - gesture.start).distance <= kTouchSlop) {
+        return; // still within tap slop — could resolve to a click
+      }
+      gesture.tapPending = false; // slop crossed → a swipe, not a tap
+    }
+    // Forward wheel only once the arena resolves in our favor: suppress while
+    // unresolved (don't leak wheel before the axis is decided) and when lost (an
+    // ancestor horizontal pager owns this swipe → page flip only).
+    if (gesture.arenaOutcome != _TouchArenaOutcome.won) {
+      return;
+    }
+    gesture.wheelRemainder += event.delta.dy;
+    final steps = (gesture.wheelRemainder / metrics.linePixels).truncate();
+    if (steps == 0) {
+      return;
+    }
+    gesture.wheelRemainder -= steps * metrics.linePixels;
+    // Finger down (positive dy) scrolls up into history → wheel button 4;
+    // finger up → button 5.
+    for (var i = 0; i < steps.abs(); i++) {
+      _sendWheelStep(event, size, metrics, up: steps > 0);
+    }
+  }
+
+  void _onTouchMousePointerUp(
+    PointerUpEvent event,
+    Size size,
+    _TerminalMetrics metrics,
+  ) {
+    // Only the tracked finger's lift ends the gesture; a different finger
+    // lifting must not reset our state (which would drop a pending click or
+    // clear an active selection owned by the tracked finger).
+    final gesture = _activeFor(event, _TouchGestureRole.mouseForward);
+    if (gesture == null) {
+      return;
+    }
+    final wasTap = gesture.tapPending && !_touchSelectionActive;
+    // Capture before the reset nulls `_active`: the deferred click reports the
+    // down cell.
+    final downPosition = gesture.start;
+    _resetActiveGesture();
+    if (!wasTap ||
+        !_terminalMouseReportingCapturesPointerKind(PointerDeviceKind.touch)) {
+      return;
+    }
+    // Deferred click: press + release at the down cell (where the finger
+    // landed), not the release cell — a tap may drift within `kTouchSlop`.
+    _sendMouseEvent(
+      GhosttyMouseAction.GHOSTTY_MOUSE_ACTION_PRESS,
+      event,
+      size,
+      metrics,
+      positionOverride: downPosition,
+    );
+    _sendMouseEvent(
+      GhosttyMouseAction.GHOSTTY_MOUSE_ACTION_RELEASE,
+      event,
+      size,
+      metrics,
+      positionOverride: downPosition,
+    );
+  }
+
+  void _onTouchMousePointerCancel(PointerCancelEvent event) {
+    if (_activeFor(event, _TouchGestureRole.mouseForward) == null) {
+      return;
+    }
+    _resetActiveGesture();
   }
 
   void _handleSerialTapUp(
@@ -1862,6 +2764,11 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
     Size size,
     _TerminalMetrics metrics,
   ) {
+    // Pinch owns both fingers — a selection recognizer that limps through the
+    // arena mid-pinch must not start a drag-select under them.
+    if (_pinchZoomActive) {
+      return;
+    }
     if (_currentPointerUsesTerminalMouse) {
       return;
     }
@@ -1927,7 +2834,13 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
     Size size,
     _TerminalMetrics metrics,
   ) {
-    if (_currentPointerUsesTerminalMouse) {
+    // See `_beginSelection`: no selection updates while a pinch is active.
+    if (_pinchZoomActive) {
+      return;
+    }
+    // Extending a long-press selection stays local even in mouse mode (see
+    // `_beginLineSelection`).
+    if (_currentPointerUsesTerminalMouse && !_touchLongPressSelecting) {
       return;
     }
     final position = _positionForOffset(
@@ -1960,6 +2873,22 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
         extendLineSelection: (anchorRow, position) =>
             _resolveLineSelectionBetweenRows(anchorRow, position.row),
       ),
+      _TerminalSelectionGranularity.visualRow =>
+        _gestureCoordinator.updateSelection(
+          currentSelection: _selection,
+          position: position,
+          extendSelection: (currentSelection, position) =>
+              GhosttyTerminalSelection(
+                base: currentSelection.base,
+                extent: position,
+              ),
+          extendLineSelection: (anchorRow, position) =>
+              _resolveLineSelectionBetweenRows(
+                anchorRow,
+                position.row,
+                walkWrapChain: false,
+              ),
+        ),
     };
     if (nextSelection == null) {
       return;
@@ -2012,27 +2941,46 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
     );
   }
 
+  // [granularity] is [_TerminalSelectionGranularity.line] for desktop
+  // triple-click (walks the wrap chain → whole logical line) or `visualRow` for
+  // touch long-press (stays on the pressed on-screen row, so a full-width TUI
+  // row isn't expanded across the whole screen). Drag-extend then continues at
+  // the same granularity.
   void _beginLineSelection(
     Offset localPosition,
     Size size,
-    _TerminalMetrics metrics,
-  ) {
-    if (_currentPointerUsesTerminalMouse) {
+    _TerminalMetrics metrics, {
+    _TerminalSelectionGranularity granularity =
+        _TerminalSelectionGranularity.line,
+  }) {
+    // See `_beginSelection`: a slow pinch can sit inside long-press slop long
+    // enough for the recognizer to fire — swallow it while the pinch is live.
+    if (_pinchZoomActive) {
       return;
     }
+    // A long-press selects even while mouse mode captures touch — that gesture
+    // is never claimed by the TUI, so it stays the local copy affordance.
+    if (_currentPointerUsesTerminalMouse && !_touchLongPressSelecting) {
+      return;
+    }
+    final walkWrapChain =
+        granularity != _TerminalSelectionGranularity.visualRow;
     final position = _positionForOffset(localPosition, size, metrics);
     final selection = _gestureCoordinator.beginLineSelection(
       position: position,
       rowOfPosition: (position) => position.row,
-      resolveLineSelection: (position) =>
-          _resolveLineSelectionBetweenRows(position.row, position.row),
+      resolveLineSelection: (position) => _resolveLineSelectionBetweenRows(
+        position.row,
+        position.row,
+        walkWrapChain: walkWrapChain,
+      ),
     );
     if (selection == null) {
       return;
     }
     _stopAutoScroll();
     _wordSelectionAnchor = null;
-    _dragSelectionGranularity = _TerminalSelectionGranularity.line;
+    _dragSelectionGranularity = granularity;
     if (_lastPointerKind == PointerDeviceKind.touch) {
       _touchSelectionActive = true;
     }
@@ -2062,29 +3010,139 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
       result = GestureDetector(
         supportedDevices: _touchPointerDevices,
         behavior: HitTestBehavior.opaque,
-        onLongPressStart: (details) =>
-            _beginLineSelection(details.localPosition, size, metrics),
+        // `_touchLongPressSelecting` opens the selection guards for the span of
+        // the long-press so a finger can still select/copy while mouse mode is
+        // forwarding taps and swipes to the TUI.
+        onLongPressStart: (details) {
+          _touchLongPressSelecting = true;
+          _beginLineSelection(
+            details.localPosition,
+            size,
+            metrics,
+            granularity: _TerminalSelectionGranularity.visualRow,
+          );
+        },
         onLongPressMoveUpdate: (details) =>
             _updateSelection(details.localPosition, size, metrics),
-        onLongPressEnd: (_) => _stopAutoScroll(),
+        onLongPressEnd: (_) {
+          _touchLongPressSelecting = false;
+          _stopAutoScroll();
+        },
+        // Cancel must stop auto-scroll too: onLongPressStart may have entered an
+        // edge band and armed the repeating auto-scroll timer, and cancel (arena
+        // loss) fires instead of onLongPressEnd — without this the timer runs away.
+        onLongPressCancel: () {
+          _touchLongPressSelecting = false;
+          _stopAutoScroll();
+        },
         child: result,
       );
     }
 
-    return GestureDetector(
-      supportedDevices: _selectionDragDevices,
+    // RawGestureDetector (not GestureDetector) so the selection pan
+    // recognizer can exclude `PointerDeviceKind.trackpad` from its
+    // supported devices. Without the exclusion, trackpad two-finger scroll
+    // (`PointerPanZoom*` events, kind=trackpad) is caught by Flutter's
+    // default pan recognition and starts a drag-select. Trackpad scroll is
+    // handled instead by the outer `Listener`'s `onPointerPanZoom*`
+    // callbacks, which feed `_handlePointerPanZoomUpdate`. Regular tap/
+    // drag on the touchpad arrives as kind=mouse and is unaffected.
+    final selectionPanDevices = _selectionDragDevices
+        .where((kind) => kind != PointerDeviceKind.trackpad)
+        .toSet();
+    final gestures = <Type, GestureRecognizerFactory>{
+      LongPressGestureRecognizer:
+          GestureRecognizerFactoryWithHandlers<LongPressGestureRecognizer>(
+            () => LongPressGestureRecognizer(
+              supportedDevices: _selectionDragDevices,
+            ),
+            (recognizer) {
+              // Touch long-press selects a single visual row; mouse long-press
+              // keeps the wrap-walking logical-line selection (desktop unchanged).
+              recognizer.onLongPressStart = (details) {
+                if (_lastPointerKind == PointerDeviceKind.touch) {
+                  // Mirror the scroll-mode detector above: open the selection
+                  // guards for the span of the long-press so a touch can still
+                  // select/copy while mouse mode forwards taps to the TUI. This
+                  // path owns touch long-press in `selection` drag-behavior;
+                  // without the flag, `_beginLineSelection`'s mouse-mode guard
+                  // drops the selection.
+                  _touchLongPressSelecting = true;
+                  _beginLineSelection(
+                    details.localPosition,
+                    size,
+                    metrics,
+                    granularity: _TerminalSelectionGranularity.visualRow,
+                  );
+                } else {
+                  _beginLineSelection(details.localPosition, size, metrics);
+                }
+              };
+              recognizer.onLongPressMoveUpdate = (details) =>
+                  _updateSelection(details.localPosition, size, metrics);
+              recognizer.onLongPressEnd = (_) {
+                _touchLongPressSelecting = false;
+                _stopAutoScroll();
+              };
+              recognizer.onLongPressCancel = () {
+                _touchLongPressSelecting = false;
+                _stopAutoScroll();
+              };
+            },
+          ),
+      PanGestureRecognizer:
+          GestureRecognizerFactoryWithHandlers<PanGestureRecognizer>(
+            () => PanGestureRecognizer(supportedDevices: selectionPanDevices),
+            (recognizer) {
+              recognizer.onDown = (details) =>
+                  _beginSelection(details.localPosition, size, metrics);
+              recognizer.onUpdate = (details) =>
+                  _updateSelection(details.localPosition, size, metrics);
+              recognizer.onEnd = (_) => _stopAutoScroll();
+              recognizer.onCancel = _stopAutoScroll;
+            },
+          ),
+    };
+
+    // Thin arena-claimer for touch: a dominantly-vertical touch drag must WIN the
+    // gesture arena so an ancestor horizontal pager (the mobile PageView) is
+    // rejected — otherwise scrolling the terminal also flips the page (the two
+    // collide on diagonal swipes). Flutter's native axis disambiguation handles
+    // the rest: a dominantly-horizontal drag never crosses this recognizer's
+    // vertical slop, so it stays unclaimed and bubbles to the PageView. The
+    // recognizer does no work — wheel/scrollback stays in the out-of-arena
+    // `Listener` (onPointerMove) as the single source of motion truth; these
+    // callbacks exist only to enter and win the arena. Touch-only via
+    // `_touchPointerDevices`, so mouse/stylus/trackpad drags never reach it
+    // (desktop drag-select, wheel, keyboard unchanged). Excluded in `selection`
+    // drag-behavior, where the selection `PanGestureRecognizer` already claims
+    // touch drags and a vertical claimer would fight it.
+    if (widget.touchDragBehavior == GhosttyTerminalTouchDragBehavior.scroll) {
+      gestures[VerticalDragGestureRecognizer] =
+          GestureRecognizerFactoryWithHandlers<VerticalDragGestureRecognizer>(
+            () => VerticalDragGestureRecognizer(
+              supportedDevices: _touchPointerDevices,
+            ),
+            (recognizer) {
+              // Winning the arena means this is a dominantly-vertical touch drag:
+              // mark the gesture `won` so the out-of-arena `Listener` may forward
+              // scroll/wheel. Losing means an ancestor horizontal pager claimed
+              // the touch (a dominantly-horizontal swipe): mark it `lost` so a
+              // diagonal swipe flips the page WITHOUT also scrolling the terminal.
+              recognizer.onStart = (_) {
+                _active?.arenaOutcome = _TouchArenaOutcome.won;
+              };
+              recognizer.onUpdate = (_) {};
+              recognizer.onCancel = () {
+                _active?.arenaOutcome = _TouchArenaOutcome.lost;
+              };
+            },
+          );
+    }
+
+    return RawGestureDetector(
       behavior: HitTestBehavior.opaque,
-      onLongPressStart: (details) =>
-          _beginLineSelection(details.localPosition, size, metrics),
-      onLongPressMoveUpdate: (details) =>
-          _updateSelection(details.localPosition, size, metrics),
-      onLongPressEnd: (_) => _stopAutoScroll(),
-      onPanDown: (details) =>
-          _beginSelection(details.localPosition, size, metrics),
-      onPanUpdate: (details) =>
-          _updateSelection(details.localPosition, size, metrics),
-      onPanEnd: (_) => _stopAutoScroll(),
-      onPanCancel: _stopAutoScroll,
+      gestures: gestures,
       child: result,
     );
   }
@@ -2133,42 +3191,70 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
                 _lastPointerKind = event.kind;
                 _startTouchScroll(event);
                 _requestTerminalFocus();
-                _sendMouseEvent(
-                  GhosttyMouseAction.GHOSTTY_MOUSE_ACTION_PRESS,
-                  event,
-                  size,
-                  metrics,
-                );
+                // Touch defers its PRESS to pointer-up (tap → click) or
+                // converts drag into wheel scroll; only real mice press on down.
+                if (event.kind == PointerDeviceKind.touch) {
+                  _onTouchMousePointerDown(event);
+                  // After the single-finger starters: a second finger promotes
+                  // the gesture to a pinch, which resets whatever they tracked.
+                  _pinchZoomPointerDown(event);
+                } else {
+                  _sendMouseEvent(
+                    GhosttyMouseAction.GHOSTTY_MOUSE_ACTION_PRESS,
+                    event,
+                    size,
+                    metrics,
+                  );
+                }
               },
               onPointerMove: (event) {
-                _updateTouchScroll(event, size, metrics);
-                _sendMouseEvent(
-                  GhosttyMouseAction.GHOSTTY_MOUSE_ACTION_MOTION,
-                  event,
-                  size,
-                  metrics,
-                );
+                if (event.kind == PointerDeviceKind.touch) {
+                  _pinchZoomPointerMove(event);
+                  _updateTouchScroll(event, size, metrics);
+                  _onTouchMousePointerMove(event, size, metrics);
+                } else {
+                  _sendMouseEvent(
+                    GhosttyMouseAction.GHOSTTY_MOUSE_ACTION_MOTION,
+                    event,
+                    size,
+                    metrics,
+                  );
+                }
               },
               onPointerUp: (event) {
-                _endTouchScroll(event);
-                _sendMouseEvent(
-                  GhosttyMouseAction.GHOSTTY_MOUSE_ACTION_RELEASE,
-                  event,
-                  size,
-                  metrics,
-                );
+                if (event.kind == PointerDeviceKind.touch) {
+                  _pinchZoomPointerUpOrCancel(event);
+                  _endTouchScroll(event);
+                  _onTouchMousePointerUp(event, size, metrics);
+                } else {
+                  _sendMouseEvent(
+                    GhosttyMouseAction.GHOSTTY_MOUSE_ACTION_RELEASE,
+                    event,
+                    size,
+                    metrics,
+                  );
+                }
               },
               onPointerCancel: (event) {
-                _endTouchScroll(event);
-                _sendMouseEvent(
-                  GhosttyMouseAction.GHOSTTY_MOUSE_ACTION_RELEASE,
-                  event,
-                  size,
-                  metrics,
-                );
+                if (event.kind == PointerDeviceKind.touch) {
+                  _pinchZoomPointerUpOrCancel(event);
+                  _endTouchScroll(event);
+                  _onTouchMousePointerCancel(event);
+                } else {
+                  _sendMouseEvent(
+                    GhosttyMouseAction.GHOSTTY_MOUSE_ACTION_RELEASE,
+                    event,
+                    size,
+                    metrics,
+                  );
+                }
               },
               onPointerSignal: (event) =>
                   _handlePointerSignal(event, size, metrics),
+              onPointerPanZoomStart: _handlePointerPanZoomStart,
+              onPointerPanZoomUpdate: (event) =>
+                  _handlePointerPanZoomUpdate(event, size, metrics),
+              onPointerPanZoomEnd: _handlePointerPanZoomEnd,
               child: RawGestureDetector(
                 behavior: HitTestBehavior.opaque,
                 gestures: <Type, GestureRecognizerFactory>{
@@ -2203,6 +3289,7 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
                             renderer: widget.renderer,
                             running: widget.controller.isRunning,
                             focused: _focusNode.hasFocus,
+                            showFocusRing: widget.showFocusRing,
                             cols: widget.controller.cols,
                             rows: widget.controller.rows,
                             scrollOffsetLines: _scrollOffsetLines,
@@ -2216,12 +3303,16 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
                             selectionColor: widget.selectionColor,
                             hyperlinkColor: widget.hyperlinkColor,
                             palette: widget.palette,
+                            minimumContrastRatio: widget.minimumContrastRatio,
+                            contrastFloorCache: _contrastFloorCache,
                             fontSize: widget.fontSize,
                             fontFamily: widget.fontFamily ?? 'monospace',
                             fontFamilyFallback: widget.fontFamilyFallback,
                             fontPackage: widget.fontPackage,
-                            letterSpacing: widget.letterSpacing,
-                            padding: widget.padding,
+                            fontWeight: widget.fontWeight,
+                            boldFontWeight: widget.boldFontWeight,
+                            letterSpacing: metrics.letterSpacing,
+                            padding: _effectivePadding(size, metrics),
                             headerHeight: _headerHeight,
                             devicePixelRatio: MediaQuery.devicePixelRatioOf(
                               context,
@@ -2435,11 +3526,16 @@ GhosttyTerminalSelection? _renderSnapshotWordSelectionAt(
   return GhosttyTerminalSelection(base: startPosition, extent: endPosition);
 }
 
+// When [walkWrapChain] is true (desktop line selection) the span grows to cover
+// the whole soft-wrapped logical line; when false (touch visual-row selection)
+// it stays on the pressed on-screen rows, so a full-width TUI row isn't expanded
+// across the entire screen.
 GhosttyTerminalSelection? _renderSnapshotLineSelectionBetweenRows(
   GhosttyTerminalRenderSnapshot snapshot,
   int baseRow,
   int extentRow, {
   required int viewportStartLine,
+  bool walkWrapChain = true,
 }) {
   if (!snapshot.hasViewportData || snapshot.rowsData.isEmpty) {
     return null;
@@ -2451,13 +3547,15 @@ GhosttyTerminalSelection? _renderSnapshotLineSelectionBetweenRows(
   final endRow = extentRow.clamp(minRow, maxRow);
   var normalizedStart = math.min(startRow, endRow) - viewportStartLine;
   var normalizedEnd = math.max(startRow, endRow) - viewportStartLine;
-  while (normalizedStart > 0 &&
-      snapshot.rowsData[normalizedStart].wrapContinuation) {
-    normalizedStart--;
-  }
-  while (normalizedEnd + 1 < snapshot.rowsData.length &&
-      snapshot.rowsData[normalizedEnd].wrap) {
-    normalizedEnd++;
+  if (walkWrapChain) {
+    while (normalizedStart > 0 &&
+        snapshot.rowsData[normalizedStart].wrapContinuation) {
+      normalizedStart--;
+    }
+    while (normalizedEnd + 1 < snapshot.rowsData.length &&
+        snapshot.rowsData[normalizedEnd].wrap) {
+      normalizedEnd++;
+    }
   }
   final endCol = math.max(
     0,
@@ -2647,6 +3745,7 @@ class _GhosttyTerminalPainter extends CustomPainter {
     required this.renderer,
     required this.running,
     required this.focused,
+    required this.showFocusRing,
     required this.cols,
     required this.rows,
     required this.scrollOffsetLines,
@@ -2660,10 +3759,14 @@ class _GhosttyTerminalPainter extends CustomPainter {
     required this.selectionColor,
     required this.hyperlinkColor,
     required this.palette,
+    required this.minimumContrastRatio,
+    required this.contrastFloorCache,
     required this.fontSize,
     required this.fontFamily,
     required this.fontFamilyFallback,
     required this.fontPackage,
+    required this.fontWeight,
+    required this.boldFontWeight,
     required this.letterSpacing,
     required this.padding,
     required this.headerHeight,
@@ -2680,6 +3783,7 @@ class _GhosttyTerminalPainter extends CustomPainter {
   final GhosttyTerminalRendererMode renderer;
   final bool running;
   final bool focused;
+  final bool showFocusRing;
   final int cols;
   final int rows;
   final int scrollOffsetLines;
@@ -2692,11 +3796,20 @@ class _GhosttyTerminalPainter extends CustomPainter {
   final Color cursorColor;
   final Color selectionColor;
   final Color hyperlinkColor;
+
+  /// ANSI palette for the formatter fallback. The renderState path takes its
+  /// colors from the engine per cell and never consults this.
   final GhosttyTerminalPalette palette;
+  final double? minimumContrastRatio;
+
+  /// Shared with (and cleared by) the owning State — see `_contrastFloorCache`.
+  final HashMap<(int, int), Color> contrastFloorCache;
   final double fontSize;
   final String fontFamily;
   final List<String>? fontFamilyFallback;
   final String? fontPackage;
+  final FontWeight fontWeight;
+  final FontWeight boldFontWeight;
   final double letterSpacing;
   final EdgeInsets padding;
   final double headerHeight;
@@ -2740,7 +3853,7 @@ class _GhosttyTerminalPainter extends CustomPainter {
 
       final status = [
         '${cols}x$rows${scrollOffsetLines > 0 ? '  +$scrollOffsetLines' : ''}',
-        _widgetModeLabel(renderer, renderSnapshot, scrollOffsetLines),
+        _widgetModeLabel(renderer, renderSnapshot),
       ].join('  •  ');
       final statusPainter = TextPainter(
         text: TextSpan(
@@ -2766,12 +3879,6 @@ class _GhosttyTerminalPainter extends CustomPainter {
       return;
     }
 
-    final maxVisible = math.max(1, (contentHeight / linePixels).floor());
-    final maxOffset = math.max(0, snapshot.lines.length - maxVisible);
-    final offset = scrollOffsetLines.clamp(0, maxOffset);
-    final end = math.max(0, snapshot.lines.length - offset);
-    final start = math.max(0, end - maxVisible);
-    final visible = snapshot.lines.sublist(start, end);
     final contentRect = Rect.fromLTWH(
       padding.left,
       contentTop,
@@ -2784,7 +3891,6 @@ class _GhosttyTerminalPainter extends CustomPainter {
     final nativeRender = renderSnapshot;
     if (renderer == GhosttyTerminalRendererMode.renderState &&
         nativeRender != null &&
-        scrollOffsetLines == 0 &&
         nativeRender.hasViewportData) {
       // Respect widget defaults for the viewport baseline while still mapping
       // native explicit colors against Ghostty's original defaults.
@@ -2792,7 +3898,7 @@ class _GhosttyTerminalPainter extends CustomPainter {
       _paintNativeRenderState(
         canvas,
         contentTop: contentTop,
-        visibleStartLine: start,
+        visibleStartLine: visibleStartLine,
         defaultForeground: foregroundColor,
         defaultBackground: backgroundColor,
         nativeDefaultForeground: nativeRender.foregroundColor,
@@ -2809,7 +3915,23 @@ class _GhosttyTerminalPainter extends CustomPainter {
         color: cursorColor,
       );
       canvas.restore();
-      if (focused) {
+      // Port of Ghostty's `window-padding-color=extend`: bleed the edge
+      // cells' background into the padding gutters so a TUI whose bg differs
+      // from the chrome (e.g. opencode's #0a0a0a vs our bgDeepest) doesn't
+      // show a mismatched strip around the grid. Painted AFTER `restore()`
+      // so it lands in the padding region (outside the content clip).
+      _paintPaddingExtend(
+        canvas,
+        size: size,
+        contentTop: contentTop,
+        defaultForeground: foregroundColor,
+        defaultBackground: backgroundColor,
+        nativeDefaultForeground: nativeRender.foregroundColor,
+        nativeDefaultBackground: nativeRender.backgroundColor,
+        linePixels: linePixels,
+        rowsData: nativeRender.rowsData,
+      );
+      if (focused && showFocusRing) {
         final focusPaint = Paint()
           ..style = PaintingStyle.stroke
           ..strokeWidth = 1
@@ -2819,6 +3941,20 @@ class _GhosttyTerminalPainter extends CustomPainter {
       return;
     }
 
+    // No engine render state to draw. On web that is permanent — the web
+    // controller resolves no native assets and hardcodes a null render
+    // snapshot — and on native it holds until the first frame arrives. Paint
+    // the formatter snapshot instead; skipping it leaves a bare background,
+    // which on web means the terminal never renders at all.
+    canvas.drawRect(contentRect, Paint()..color = backgroundColor);
+
+    final maxVisible = math.max(1, (contentHeight / linePixels).floor());
+    final maxOffset = math.max(0, snapshot.lines.length - maxVisible);
+    final offset = scrollOffsetLines.clamp(0, maxOffset);
+    final end = math.max(0, snapshot.lines.length - offset);
+    final start = math.max(0, end - maxVisible);
+    final visible = snapshot.lines.sublist(start, end);
+
     for (var visibleIndex = 0; visibleIndex < visible.length; visibleIndex++) {
       final rowBand = _rowBand(
         contentTop: contentTop,
@@ -2826,12 +3962,11 @@ class _GhosttyTerminalPainter extends CustomPainter {
         linePixels: linePixels,
         devicePixelRatio: devicePixelRatio,
       );
-      final y = rowBand.top;
-      final line = visible[visibleIndex];
       if (rowBand.top >= size.height) {
         break;
       }
-
+      final y = rowBand.top;
+      final line = visible[visibleIndex];
       final row = start + visibleIndex;
       final resolvedStyles = line.runs
           .map(
@@ -2844,6 +3979,7 @@ class _GhosttyTerminalPainter extends CustomPainter {
             ),
           )
           .toList(growable: false);
+
       var x = padding.left;
       for (var runIndex = 0; runIndex < line.runs.length; runIndex++) {
         final run = line.runs[runIndex];
@@ -2922,99 +4058,93 @@ class _GhosttyTerminalPainter extends CustomPainter {
           painter.paint(canvas, Offset(rowRect.left, rowBand.top));
           canvas.restore();
         } else {
+          // Same per-glyph placement as the renderState path: relax the clip so
+          // an oversized symbol-font fallback bleeds into the neighbouring cell
+          // instead of being shaved, and sit glyphs on the shared row baseline.
+          canvas.save();
+          canvas.clipRect(
+            Rect.fromLTRB(
+              x - charWidth,
+              rowBand.top - linePixels,
+              x + (run.cells * charWidth) + charWidth,
+              rowBand.bottom + linePixels,
+            ),
+          );
           for (var index = 0; index < graphemes.length; index++) {
             final character = graphemes[index];
             final widthCells = cellWidths[index];
-            final width = widthCells * charWidth;
-            final rect = Rect.fromLTRB(
+            final cellWidth = widthCells * charWidth;
+            final cellRect = Rect.fromLTRB(
               textX,
               rowBand.top,
-              textX + width,
+              textX + cellWidth,
               rowBand.bottom,
             );
             if (widthCells == 1 &&
                 _paintTerminalSpecialGlyph(
                   canvas,
                   character,
-                  rect: rect,
+                  rect: cellRect,
                   color: style.foreground,
                 )) {
-              textX += width;
+              textX += cellWidth;
               continue;
             }
             _debugLogUnsupportedGlyph(character);
             final painter = TextPainter(
-              text: TextSpan(text: character, style: textStyle),
+              text: TextSpan(
+                text: character,
+                style: textStyle.copyWith(letterSpacing: 0),
+              ),
               textDirection: TextDirection.ltr,
               maxLines: 1,
             )..layout();
-            painter.paint(
-              canvas,
-              _centerGlyphInCell(
-                painter,
-                character,
-                cellRect: rect,
-                fallbackHeight: rowBand.height,
-              ),
-            );
-            textX += width;
+            final glyphX = painter.width > cellWidth
+                ? textX + (cellWidth - painter.width) / 2
+                : textX;
+            painter.paint(canvas, Offset(glyphX, rowBand.top));
+            textX += cellWidth;
           }
+          canvas.restore();
         }
         x += run.cells * charWidth;
       }
     }
 
-    final shouldPaintNativeCursor =
-        scrollOffsetLines == 0 &&
-        nativeRender != null &&
-        nativeRender.hasViewportData;
-    if (shouldPaintNativeCursor) {
-      _paintNativeCursor(
-        canvas,
-        contentTop: contentTop,
-        linePixels: linePixels,
-        visibleRows: nativeRender.rowsData.length,
-        cursor: nativeRender.cursor,
-        color: cursorColor,
-      );
-    } else {
-      final shouldPaintSnapshotCursor =
-          snapshot.cursor != null && scrollOffsetLines == 0;
-      final cursor = shouldPaintSnapshotCursor ? snapshot.cursor : null;
-      if (cursor != null) {
-        final cursorLine = cursor.row - start;
-        if (cursorLine >= 0 && cursorLine < visible.length) {
-          final cursorRowBand = _rowBand(
-            contentTop: contentTop,
-            rowIndex: cursorLine,
-            linePixels: linePixels,
-            devicePixelRatio: devicePixelRatio,
-          );
-          final cursorRect = Rect.fromLTWH(
-            padding.left + (cursor.col * charWidth),
-            cursorRowBand.top,
-            charWidth,
-            cursorRowBand.height,
-          );
-          if (focused) {
-            canvas.drawRect(
-              cursorRect,
-              Paint()..color = cursorColor.withValues(alpha: 0.78),
-            );
-          }
+    final cursor = scrollOffsetLines == 0 ? snapshot.cursor : null;
+    if (cursor != null) {
+      final cursorLine = cursor.row - start;
+      if (cursorLine >= 0 && cursorLine < visible.length) {
+        final cursorRowBand = _rowBand(
+          contentTop: contentTop,
+          rowIndex: cursorLine,
+          linePixels: linePixels,
+          devicePixelRatio: devicePixelRatio,
+        );
+        final cursorRect = Rect.fromLTWH(
+          padding.left + (cursor.col * charWidth),
+          cursorRowBand.top,
+          charWidth,
+          cursorRowBand.height,
+        );
+        if (focused) {
           canvas.drawRect(
-            cursorRect.deflate(0.5),
-            Paint()
-              ..color = cursorColor.withValues(alpha: focused ? 1 : 0.88)
-              ..style = PaintingStyle.stroke
-              ..strokeWidth = 1,
+            cursorRect,
+            Paint()..color = cursorColor.withValues(alpha: 0.78),
           );
         }
+        canvas.drawRect(
+          cursorRect.deflate(0.5),
+          Paint()
+            ..color = cursorColor.withValues(alpha: focused ? 1 : 0.88)
+            ..style = PaintingStyle.stroke
+            ..strokeWidth = 1,
+        );
       }
     }
     canvas.restore();
 
-    if (focused) {
+    if (focused && showFocusRing) {
       final focusPaint = Paint()
         ..style = PaintingStyle.stroke
         ..strokeWidth = 1
@@ -3029,6 +4159,7 @@ class _GhosttyTerminalPainter extends CustomPainter {
         title != oldDelegate.title ||
         running != oldDelegate.running ||
         focused != oldDelegate.focused ||
+        showFocusRing != oldDelegate.showFocusRing ||
         cols != oldDelegate.cols ||
         rows != oldDelegate.rows ||
         scrollOffsetLines != oldDelegate.scrollOffsetLines ||
@@ -3036,6 +4167,8 @@ class _GhosttyTerminalPainter extends CustomPainter {
         charWidth != oldDelegate.charWidth ||
         linePixels != oldDelegate.linePixels ||
         fontSize != oldDelegate.fontSize ||
+        fontWeight != oldDelegate.fontWeight ||
+        boldFontWeight != oldDelegate.boldFontWeight ||
         fontFamily != oldDelegate.fontFamily ||
         !listEquals(fontFamilyFallback, oldDelegate.fontFamilyFallback) ||
         fontPackage != oldDelegate.fontPackage ||
@@ -3050,6 +4183,7 @@ class _GhosttyTerminalPainter extends CustomPainter {
         selectionColor != oldDelegate.selectionColor ||
         hyperlinkColor != oldDelegate.hyperlinkColor ||
         palette != oldDelegate.palette ||
+        minimumContrastRatio != oldDelegate.minimumContrastRatio ||
         selection != oldDelegate.selection ||
         renderer != oldDelegate.renderer ||
         !_renderSnapshotEquals(renderSnapshot, oldDelegate.renderSnapshot) ||
@@ -3132,13 +4266,18 @@ class _GhosttyTerminalPainter extends CustomPainter {
             ),
             hasHyperlink: run.hasHyperlink,
           );
-          final textForeground =
-              !run.style.hasExplicitForeground && run.hasHyperlink
-              ? hyperlinkColor
-              : foreground;
+          // _resolveNativeForeground already applies the hyperlink override
+          // (and the contrast floor on top of it); re-deriving it here from
+          // the raw hyperlinkColor would bypass the floor.
+          final textForeground = foreground;
           final decorationColor = run.style.hasExplicitUnderlineColor
               ? run.style.underlineColor
               : textForeground;
+          // One source for the run's weight: the painted style, the single-run
+          // width probe and the painter cache key must all agree, or the cache
+          // returns a painter laid out at a different weight than the probe
+          // measured.
+          final runWeight = run.style.bold ? boldFontWeight : fontWeight;
           final textStyle = TextStyle(
             color: textForeground,
             fontFamily: fontFamily,
@@ -3147,7 +4286,7 @@ class _GhosttyTerminalPainter extends CustomPainter {
             fontSize: fontSize,
             height: linePixels / fontSize,
             letterSpacing: letterSpacing,
-            fontWeight: run.style.bold ? FontWeight.w700 : FontWeight.w400,
+            fontWeight: runWeight,
             fontStyle: run.style.italic ? FontStyle.italic : FontStyle.normal,
             decoration: _nativeTextDecoration(
               style: run.style,
@@ -3174,9 +4313,7 @@ class _GhosttyTerminalPainter extends CustomPainter {
                 _shouldPaintTerminalRunAsSingleRun(
                   text: run.text,
                   width: run.width * charWidth,
-                  fontWeight: run.style.bold
-                      ? FontWeight.w700
-                      : FontWeight.w400,
+                  fontWeight: runWeight,
                   fontStyle: run.style.italic
                       ? FontStyle.italic
                       : FontStyle.normal,
@@ -3193,9 +4330,7 @@ class _GhosttyTerminalPainter extends CustomPainter {
                   fontPackage: fontPackage,
                   letterSpacing: letterSpacing,
                   color: textForeground,
-                  fontWeight: run.style.bold
-                      ? FontWeight.w700
-                      : FontWeight.w400,
+                  fontWeight: runWeight,
                   fontStyle: run.style.italic
                       ? FontStyle.italic
                       : FontStyle.normal,
@@ -3215,6 +4350,35 @@ class _GhosttyTerminalPainter extends CustomPainter {
               painter.paint(canvas, Offset(rect.left, y));
               canvas.restore();
             } else {
+              // Per-glyph fallback for runs that can't be painted as a single
+              // run (wide cells, custom-painted glyphs, or text failing the
+              // single-run safety checks). Mirror ghostty-web's model: clip to
+              // the run, then place each glyph left-aligned on the shared row
+              // baseline at its natural font size — exactly the single-run
+              // path's `painter.paint(canvas, Offset(rect.left, rowBand.top))`,
+              // where `textStyle.height` positions the baseline within the line
+              // box. The previous `_centerGlyphInCell` centered glyphs on their
+              // tight ink bounds, which distorted apparent width and pulled
+              // glyphs off the baseline relative to their neighbors.
+              // Relax the clip around the run. Oversized fallback-font symbols
+              // (e.g. dingbats like U+273D pulled from a system symbol font)
+              // carry a near-1em advance that is wider than the mono cell; left-
+              // aligned and clipped to the run's right edge, the glyph's right
+              // half gets shaved ("half" star). Allowing roughly a cell of
+              // overflow on each side — paired with centering oversized glyphs
+              // below — keeps the whole glyph visible, bleeding into the
+              // adjacent (blank, for a spinner) cell rather than clipping. The
+              // outer content-rect clip still bounds the paint. Glyphs that fit
+              // (…, −) stay left-aligned on the baseline, exactly as before.
+              canvas.save();
+              canvas.clipRect(
+                Rect.fromLTRB(
+                  rect.left - charWidth,
+                  rect.top - linePixels,
+                  rect.right + charWidth,
+                  rect.bottom + linePixels,
+                ),
+              );
               var textX = rect.left;
               for (var index = 0; index < graphemes.length; index++) {
                 final character = graphemes[index];
@@ -3222,7 +4386,7 @@ class _GhosttyTerminalPainter extends CustomPainter {
                     ? graphemeWidths[index]
                     : 1;
                 final cellWidth = widthCells * charWidth;
-                final rect = Rect.fromLTRB(
+                final cellRect = Rect.fromLTRB(
                   textX,
                   rowBand.top,
                   textX + cellWidth,
@@ -3232,7 +4396,7 @@ class _GhosttyTerminalPainter extends CustomPainter {
                     _paintTerminalSpecialGlyph(
                       canvas,
                       character,
-                      rect: rect,
+                      rect: cellRect,
                       color: textForeground,
                     )) {
                   textX += cellWidth;
@@ -3240,21 +4404,24 @@ class _GhosttyTerminalPainter extends CustomPainter {
                 }
                 _debugLogUnsupportedGlyph(character);
                 final painter = TextPainter(
-                  text: TextSpan(text: character, style: textStyle),
+                  text: TextSpan(
+                    text: character,
+                    style: textStyle.copyWith(letterSpacing: 0),
+                  ),
                   textDirection: TextDirection.ltr,
                   maxLines: 1,
                 )..layout();
-                painter.paint(
-                  canvas,
-                  _centerGlyphInCell(
-                    painter,
-                    character,
-                    cellRect: rect,
-                    fallbackHeight: rowBand.height,
-                  ),
-                );
+                // A glyph wider than its cell (oversized symbol-font fallback)
+                // is centered so it overflows symmetrically into the relaxed
+                // clip instead of being shaved on the right. Glyphs that fit
+                // keep left-aligned baseline placement.
+                final glyphX = painter.width > cellWidth
+                    ? textX + (cellWidth - painter.width) / 2
+                    : textX;
+                painter.paint(canvas, Offset(glyphX, rowBand.top));
                 textX += cellWidth;
               }
+              canvas.restore();
             }
           }
         }
@@ -3374,6 +4541,201 @@ class _GhosttyTerminalPainter extends CustomPainter {
         canvas.drawRect(shapeRect, strokePaint);
     }
   }
+
+  /// Extends the background color of the grid's edge cells into the padding
+  /// gutters, mirroring Ghostty's `window-padding-color=extend`. Without this,
+  /// the padding is a flat [backgroundColor] strip that mismatches any TUI
+  /// whose own background differs from the chrome.
+  ///
+  /// Horizontal gutters (left/right) always extend, per row, using that row's
+  /// first/last cell background. Vertical gutters (top/bottom) extend
+  /// all-or-nothing per edge row, gated by [_rowNeverExtendBg] — a faithful
+  /// port of Ghostty's `renderer/row.zig:neverExtendBg` (skip semantic
+  /// prompts, powerline glyphs, and any row touching the default background,
+  /// since those look bad stretched). Default-background cells resolve to a
+  /// transparent background here, so "don't extend default bg" falls out of
+  /// the `alpha > 0` checks for free.
+  void _paintPaddingExtend(
+    Canvas canvas, {
+    required Size size,
+    required double contentTop,
+    required Color defaultForeground,
+    required Color defaultBackground,
+    required Color nativeDefaultForeground,
+    required Color nativeDefaultBackground,
+    required double linePixels,
+    required List<GhosttyTerminalRenderRow> rowsData,
+  }) {
+    if (rowsData.isEmpty) {
+      return;
+    }
+    final hasHorizontal = padding.left > 0 || padding.right > 0;
+    final hasVertical = padding.top > 0 || padding.bottom > 0;
+    if (!hasHorizontal && !hasVertical) {
+      return;
+    }
+
+    final gridRight = size.width - padding.right;
+
+    Color backgroundOf(GhosttyTerminalRenderCell cell) =>
+        _resolveNativeStyleColors(
+          style: cell.style,
+          defaultForeground: defaultForeground,
+          defaultBackground: defaultBackground,
+          nativeDefaultForeground: nativeDefaultForeground,
+          nativeDefaultBackground: nativeDefaultBackground,
+          metadataColor: _resolveMetadataBackgroundColor(
+            metadata: cell.metadata,
+            fallback: cell.metadata.backgroundColor,
+          ),
+        ).background;
+
+    // Horizontal gutters — per row, always extend the edge cell's bg.
+    if (hasHorizontal) {
+      for (var rowIndex = 0; rowIndex < rowsData.length; rowIndex++) {
+        final cells = rowsData[rowIndex].cells;
+        if (cells.isEmpty) {
+          continue;
+        }
+        final band = _rowBand(
+          contentTop: contentTop,
+          rowIndex: rowIndex,
+          linePixels: linePixels,
+          devicePixelRatio: devicePixelRatio,
+        );
+        if (padding.left > 0) {
+          final color = backgroundOf(cells.first);
+          if (color.a > 0) {
+            canvas.drawRect(
+              Rect.fromLTRB(0, band.top, padding.left, band.bottom),
+              Paint()..color = color,
+            );
+          }
+        }
+        if (padding.right > 0) {
+          final color = backgroundOf(cells.last);
+          if (color.a > 0) {
+            canvas.drawRect(
+              Rect.fromLTRB(gridRight, band.top, size.width, band.bottom),
+              Paint()..color = color,
+            );
+          }
+        }
+      }
+    }
+
+    // Vertical gutters — all-or-nothing per edge row, plus the four corners.
+    if (hasVertical) {
+      if (padding.top > 0) {
+        _paintVerticalPaddingEdge(
+          canvas,
+          row: rowsData.first,
+          backgroundOf: backgroundOf,
+          stripTop: contentTop - padding.top,
+          stripBottom: contentTop,
+          size: size,
+          gridRight: gridRight,
+        );
+      }
+      if (padding.bottom > 0) {
+        final lastBand = _rowBand(
+          contentTop: contentTop,
+          rowIndex: rowsData.length - 1,
+          linePixels: linePixels,
+          devicePixelRatio: devicePixelRatio,
+        );
+        _paintVerticalPaddingEdge(
+          canvas,
+          row: rowsData.last,
+          backgroundOf: backgroundOf,
+          stripTop: lastBand.bottom,
+          stripBottom: size.height,
+          size: size,
+          gridRight: gridRight,
+        );
+      }
+    }
+  }
+
+  /// Fills one vertical padding strip ([stripTop]..[stripBottom], full width)
+  /// from an edge [row], per column, then extends the first/last column color
+  /// into the corner squares. No-op when the row fails [_rowNeverExtendBg].
+  void _paintVerticalPaddingEdge(
+    Canvas canvas, {
+    required GhosttyTerminalRenderRow row,
+    required Color Function(GhosttyTerminalRenderCell) backgroundOf,
+    required double stripTop,
+    required double stripBottom,
+    required Size size,
+    required double gridRight,
+  }) {
+    final cells = row.cells;
+    if (cells.isEmpty || _rowNeverExtendBg(row, backgroundOf)) {
+      return;
+    }
+    var col = 0;
+    for (final cell in cells) {
+      final color = backgroundOf(cell);
+      if (color.a > 0) {
+        final x = padding.left + (col * charWidth);
+        canvas.drawRect(
+          Rect.fromLTRB(x, stripTop, x + (cell.width * charWidth), stripBottom),
+          Paint()..color = color,
+        );
+      }
+      col += cell.width;
+    }
+    // Corners: bleed the first/last column color into the side gutters so the
+    // colored vertical strip meets the colored horizontal strips cleanly.
+    if (padding.left > 0) {
+      final color = backgroundOf(cells.first);
+      if (color.a > 0) {
+        canvas.drawRect(
+          Rect.fromLTRB(0, stripTop, padding.left, stripBottom),
+          Paint()..color = color,
+        );
+      }
+    }
+    if (padding.right > 0) {
+      final color = backgroundOf(cells.last);
+      if (color.a > 0) {
+        canvas.drawRect(
+          Rect.fromLTRB(gridRight, stripTop, size.width, stripBottom),
+          Paint()..color = color,
+        );
+      }
+    }
+  }
+
+  /// Whether an edge [row]'s background must NOT be extended into the vertical
+  /// padding. Port of Ghostty's `renderer/row.zig:neverExtendBg`: never extend
+  /// a semantic prompt row, a row containing a powerline glyph, or a row that
+  /// touches the default background (transparent here).
+  bool _rowNeverExtendBg(
+    GhosttyTerminalRenderRow row,
+    Color Function(GhosttyTerminalRenderCell) backgroundOf,
+  ) {
+    if (row.hasSemanticPrompt) {
+      return true;
+    }
+    for (final cell in row.cells) {
+      if (_isPowerlineGlyph(cell.metadata.codepoint)) {
+        return true;
+      }
+      if (backgroundOf(cell).a == 0) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /// Powerline glyphs (Ghostty's `renderer/row.zig` ranges). These are
+  /// perfect-fit dividers that look wrong when their background is stretched.
+  bool _isPowerlineGlyph(int codepoint) =>
+      (codepoint >= 0xE0B0 && codepoint <= 0xE0C8) ||
+      codepoint == 0xE0CA ||
+      (codepoint >= 0xE0CC && codepoint <= 0xE0D2) ||
+      codepoint == 0xE0D4;
 
   List<_NativeRenderRun> _collectNativeRuns(
     List<GhosttyTerminalRenderCell> cells, {
@@ -3515,7 +4877,19 @@ class _GhosttyTerminalPainter extends CustomPainter {
       metadataColor: metadataColor,
     );
     if (hasHyperlink && !style.hasExplicitForeground) {
-      return hyperlinkColor;
+      final ratio = minimumContrastRatio;
+      if (ratio == null || style.invisible) {
+        return hyperlinkColor;
+      }
+      // The hyperlink override replaces the already-floored resolved
+      // foreground, so it needs its own floor against the same cell bg.
+      return _flooredForeground(
+        hyperlinkColor,
+        resolved.background == Colors.transparent
+            ? defaultBackground
+            : resolved.background,
+        ratio,
+      );
     }
     return resolved.foreground;
   }
@@ -3545,7 +4919,40 @@ class _GhosttyTerminalPainter extends CustomPainter {
             style.background == nativeDefaultBackground
         ? Colors.transparent
         : resolved.background;
-    return (foreground: foreground, background: background);
+    final ratio = minimumContrastRatio;
+    if (ratio == null || style.invisible) {
+      // Invisible is deliberate fg == bg (SGR 8) — flooring it would reveal
+      // hidden text. Faint/dim text is NOT exempt: dim must stay readable.
+      return (foreground: foreground, background: background);
+    }
+    // Floor against the CELL's effective background, not the widget default —
+    // TUIs paint their own backgrounds, and a fg readable on the widget bg can
+    // be unreadable on the cell's. Transparent means "widget default bg".
+    return (
+      foreground: _flooredForeground(
+        foreground,
+        background == Colors.transparent ? defaultBackground : background,
+        ratio,
+      ),
+      background: background,
+    );
+  }
+
+  /// Memoized [ensureMinimumContrast]. Clear-when-full beats LRU here: the
+  /// working set (distinct on-screen fg/bg pairs) sits far below the cap and
+  /// recomputation is cheap, so eviction bookkeeping isn't worth carrying.
+  Color _flooredForeground(Color foreground, Color background, double ratio) {
+    final key = (foreground.toARGB32(), background.toARGB32());
+    final cached = contrastFloorCache[key];
+    if (cached != null) {
+      return cached;
+    }
+    final floored = ensureMinimumContrast(foreground, background, ratio);
+    if (contrastFloorCache.length >= _contrastFloorCacheMaxEntries) {
+      contrastFloorCache.clear();
+    }
+    contrastFloorCache[key] = floored;
+    return floored;
   }
 
   Color _resolvedNativeBackground({
@@ -3638,6 +5045,8 @@ class _GhosttyTerminalPainter extends CustomPainter {
     };
   }
 
+  /// Selection overlay for a formatter-snapshot row, whose cell count comes
+  /// from the line rather than the engine.
   void _paintSelection(
     Canvas canvas, {
     required GhosttyTerminalLine line,
@@ -3645,27 +5054,12 @@ class _GhosttyTerminalPainter extends CustomPainter {
     required double y,
     required double rowHeight,
   }) {
-    final selection = this.selection;
-    if (selection == null || line.cellCount == 0) {
-      return;
-    }
-    final normalized = selection.normalized;
-    if (row < normalized.start.row || row > normalized.end.row) {
-      return;
-    }
-
-    final startCol = row == normalized.start.row ? normalized.start.col : 0;
-    final endCol = row == normalized.end.row
-        ? normalized.end.col
-        : line.cellCount - 1;
-    if (endCol < startCol) {
-      return;
-    }
-    final left = padding.left + (startCol * charWidth);
-    final width = (endCol - startCol + 1) * charWidth;
-    canvas.drawRect(
-      Rect.fromLTWH(left, y, width, rowHeight),
-      Paint()..color = selectionColor,
+    _paintNativeSelection(
+      canvas,
+      row: row,
+      cellCount: line.cellCount,
+      y: y,
+      rowHeight: rowHeight,
     );
   }
 
@@ -4313,32 +5707,30 @@ class _GhosttyTerminalPainter extends CustomPainter {
     final width = right - left;
     final height = bottom - top;
 
-    if (spec.shadeAlpha case final shadeAlpha?) {
-      final shadePaint = Paint()
-        ..color = color.withValues(alpha: color.a * shadeAlpha)
-        ..style = PaintingStyle.fill
-        ..isAntiAlias = false;
-      canvas.drawRect(Rect.fromLTRB(left, top, right, bottom), shadePaint);
-      return true;
-    }
-
-    final fillLeft = left + (width * spec.leftFraction);
-    final fillTop = top + (height * spec.topFraction);
-    final fillRight = left + (width * spec.rightFraction);
-    final fillBottom = top + (height * spec.bottomFraction);
-    final fillPaint = Paint()
-      ..color = color
+    final shadeAlpha = spec.shadeAlpha;
+    final paint = Paint()
+      ..color = shadeAlpha == null
+          ? color
+          : color.withValues(alpha: color.a * shadeAlpha)
       ..style = PaintingStyle.fill
       ..isAntiAlias = false;
-    canvas.drawRect(
-      Rect.fromLTRB(
-        _snapLogicalToPhysical(fillLeft, devicePixelRatio),
-        _snapLogicalToPhysical(fillTop, devicePixelRatio),
-        _snapLogicalToPhysical(fillRight, devicePixelRatio),
-        _snapLogicalToPhysical(fillBottom, devicePixelRatio),
-      ),
-      fillPaint,
-    );
+
+    // Fill every sub-cell rect of the glyph, snapping each edge to a physical
+    // pixel. Snapping shared fractional edges (e.g. the 0.5 cell midline used by
+    // half-blocks and quadrants) means they land on the same pixel in this cell
+    // and its neighbours, so the glyphs tile seamlessly — ghostty's model of
+    // rounding fractions of the integer cell.
+    for (final r in spec.rects) {
+      canvas.drawRect(
+        Rect.fromLTRB(
+          _snapLogicalToPhysical(left + (width * r.left), devicePixelRatio),
+          _snapLogicalToPhysical(top + (height * r.top), devicePixelRatio),
+          _snapLogicalToPhysical(left + (width * r.right), devicePixelRatio),
+          _snapLogicalToPhysical(top + (height * r.bottom), devicePixelRatio),
+        ),
+        paint,
+      );
+    }
     return true;
   }
 }
@@ -4428,51 +5820,6 @@ double _snapLogicalExtentToPhysical(double value, double devicePixelRatio) {
   );
 }
 
-Offset _centerGlyphInCell(
-  TextPainter painter,
-  String text, {
-  required Rect cellRect,
-  required double fallbackHeight,
-}) {
-  final bounds = _glyphBounds(painter, text);
-  if (bounds == null) {
-    return Offset(
-      cellRect.left + _centeredGlyphOffset(cellRect.width, painter.width),
-      cellRect.top + _centeredGlyphOffset(fallbackHeight, painter.height),
-    );
-  }
-
-  return Offset(
-    cellRect.left +
-        _centeredGlyphOffset(cellRect.width, bounds.width) -
-        bounds.left,
-    cellRect.top +
-        _centeredGlyphOffset(cellRect.height, bounds.height) -
-        bounds.top,
-  );
-}
-
-Rect? _glyphBounds(TextPainter painter, String text) {
-  final boxes = painter.getBoxesForSelection(
-    TextSelection(baseOffset: 0, extentOffset: text.length),
-  );
-  if (boxes.isEmpty) {
-    return null;
-  }
-
-  var left = boxes.first.left;
-  var top = boxes.first.top;
-  var right = boxes.first.right;
-  var bottom = boxes.first.bottom;
-  for (final box in boxes.skip(1)) {
-    left = math.min(left, box.left);
-    top = math.min(top, box.top);
-    right = math.max(right, box.right);
-    bottom = math.max(bottom, box.bottom);
-  }
-  return Rect.fromLTRB(left, top, right, bottom);
-}
-
 double _boxDrawingStrokeWidth(
   Rect rect, {
   required bool heavy,
@@ -4538,29 +5885,80 @@ bool _renderSnapshotEquals(
 String _widgetModeLabel(
   GhosttyTerminalRendererMode mode,
   GhosttyTerminalRenderSnapshot? renderSnapshot,
-  int scrollOffsetLines,
 ) {
-  if (mode == GhosttyTerminalRendererMode.renderState) {
-    if (scrollOffsetLines > 0) {
-      return 'renderState (scrollback fallback)';
-    }
-    if (renderSnapshot == null || !renderSnapshot.hasViewportData) {
-      return 'renderState (fmt fallback)';
-    }
+  if (mode == GhosttyTerminalRendererMode.formatter) {
+    return 'formatter';
   }
-  return mode == GhosttyTerminalRendererMode.formatter
-      ? 'formatter'
-      : 'renderState';
+  if (renderSnapshot == null || !renderSnapshot.hasViewportData) {
+    return 'renderState (fmt fallback)';
+  }
+  return 'renderState';
 }
 
 class _TerminalMetrics {
-  const _TerminalMetrics({required this.charWidth, required this.linePixels});
+  const _TerminalMetrics({
+    required this.charWidth,
+    required this.linePixels,
+    required this.letterSpacing,
+  });
 
   final double charWidth;
   final double linePixels;
+
+  /// Letter spacing to apply to painted text so a run of N characters advances
+  /// exactly `N * charWidth`, even though [charWidth] is snapped to a whole
+  /// physical pixel and the font's natural monospace advance is fractional.
+  /// Without this, text would drift off the integer cell grid.
+  final double letterSpacing;
 }
 
-enum _TerminalSelectionGranularity { cell, word, line }
+// `visualRow` selects a single on-screen row; `line` walks the wrap chain to
+// cover the whole logical line. Touch long-press uses `visualRow` so a full-width
+// TUI row isn't expanded across the entire screen (see _beginLineSelection's
+// `granularity` param).
+enum _TerminalSelectionGranularity { cell, word, line, visualRow }
+
+// A touch gesture forwards to either scrollback (`scroll`) or, when a running
+// program has mouse reporting on, to the TUI as wheel/click (`mouseForward`).
+// The two are mutually exclusive for a given gesture — mouse reporting decides
+// which — so one active-gesture object with a role field serves both.
+enum _TouchGestureRole { scroll, mouseForward }
+
+// Gesture-arena outcome for a touch drag. Starts `unresolved`; the in-arena
+// vertical claimer (see `_buildPointerGestureLayer`) marks it `won` when this is
+// a dominantly-vertical drag, or `lost` when an ancestor horizontal pager claims
+// the touch. Scroll/wheel forwarding waits for `won`, so a diagonal swipe never
+// both scrolls the terminal and flips the page — and nothing leaks before the
+// axis is decided. In `selection` drag-behavior no claimer is installed, so
+// there's nothing to wait for and gestures begin `won` (see
+// `_initialArenaOutcome`).
+enum _TouchArenaOutcome { unresolved, won, lost }
+
+// Per-gesture touch state. One finger at a time: a second finger is ignored
+// while this is non-null, so its down/up can't corrupt the tracked finger's
+// arena outcome, tap-pending flag, or scroll/wheel remainder (the single global
+// bools this replaces did leak across fingers).
+class _TouchGesture {
+  _TouchGesture({
+    required this.pointer,
+    required this.role,
+    required this.start,
+    required this.arenaOutcome,
+    this.tapPending = false,
+  }) : lastPosition = start;
+
+  final int pointer;
+  final _TouchGestureRole role;
+  final Offset start;
+  _TouchArenaOutcome arenaOutcome;
+  Offset lastPosition;
+  double scrollRemainder = 0;
+  double wheelRemainder = 0;
+  // Mouse-forward only: the button PRESS is deferred to pointer-up so a swipe
+  // becomes wheel scroll instead of a click-drag. Cleared once the finger
+  // travels past `kTouchSlop` (a swipe, not a tap).
+  bool tapPending;
+}
 
 class _TerminalViewport {
   const _TerminalViewport({
@@ -4611,6 +6009,9 @@ final class _NativeRenderRun {
   final bool hasHyperlink;
 }
 
+/// Style for one formatter-snapshot run. The engine render-state path resolves
+/// styling per cell from native data; this is its formatter-side counterpart,
+/// used only by the fallback painter.
 final class _ResolvedTerminalStyle {
   const _ResolvedTerminalStyle({
     required this.foreground,
@@ -5220,43 +6621,125 @@ final class _TerminalSymbolGlyphSpec {
   final bool filled;
 }
 
+// The four cell quadrants as fraction rects, reused by the quadrant block
+// glyphs (U+2596…U+259F). Sharing the exact 0.5 midline fractions is what lets
+// quadrants tile seamlessly with the half-blocks (which also split at 0.5).
+const _quadTopLeft = _CellFractionRect(right: 0.5, bottom: 0.5);
+const _quadTopRight = _CellFractionRect(left: 0.5, bottom: 0.5);
+const _quadBottomLeft = _CellFractionRect(top: 0.5, right: 0.5);
+const _quadBottomRight = _CellFractionRect(left: 0.5, top: 0.5);
+
 _TerminalBlockGlyphSpec? _terminalBlockGlyphSpec(int rune) => switch (rune) {
-  0x2580 => const _TerminalBlockGlyphSpec(bottomFraction: 0.5),
-  0x2581 => const _TerminalBlockGlyphSpec(topFraction: 7 / 8),
-  0x2582 => const _TerminalBlockGlyphSpec(topFraction: 6 / 8),
-  0x2583 => const _TerminalBlockGlyphSpec(topFraction: 5 / 8),
-  0x2584 => const _TerminalBlockGlyphSpec(topFraction: 0.5),
-  0x2585 => const _TerminalBlockGlyphSpec(topFraction: 3 / 8),
-  0x2586 => const _TerminalBlockGlyphSpec(topFraction: 2 / 8),
-  0x2587 => const _TerminalBlockGlyphSpec(topFraction: 1 / 8),
-  0x2588 => const _TerminalBlockGlyphSpec(),
-  0x2589 => const _TerminalBlockGlyphSpec(rightFraction: 7 / 8),
-  0x258A => const _TerminalBlockGlyphSpec(rightFraction: 6 / 8),
-  0x258B => const _TerminalBlockGlyphSpec(rightFraction: 5 / 8),
-  0x258C => const _TerminalBlockGlyphSpec(rightFraction: 0.5),
-  0x258D => const _TerminalBlockGlyphSpec(rightFraction: 3 / 8),
-  0x258E => const _TerminalBlockGlyphSpec(rightFraction: 2 / 8),
-  0x258F => const _TerminalBlockGlyphSpec(rightFraction: 1 / 8),
-  0x2590 => const _TerminalBlockGlyphSpec(leftFraction: 0.5),
-  0x2591 => const _TerminalBlockGlyphSpec(shadeAlpha: 0.25),
-  0x2592 => const _TerminalBlockGlyphSpec(shadeAlpha: 0.5),
-  0x2593 => const _TerminalBlockGlyphSpec(shadeAlpha: 0.75),
+  // Partial blocks — a single rect filling some fraction from one cell edge.
+  0x2580 => const _TerminalBlockGlyphSpec([
+    _CellFractionRect(bottom: 0.5),
+  ]), // ▀
+  0x2581 => const _TerminalBlockGlyphSpec([_CellFractionRect(top: 7 / 8)]), // ▁
+  0x2582 => const _TerminalBlockGlyphSpec([_CellFractionRect(top: 6 / 8)]), // ▂
+  0x2583 => const _TerminalBlockGlyphSpec([_CellFractionRect(top: 5 / 8)]), // ▃
+  0x2584 => const _TerminalBlockGlyphSpec([_CellFractionRect(top: 0.5)]), // ▄
+  0x2585 => const _TerminalBlockGlyphSpec([_CellFractionRect(top: 3 / 8)]), // ▅
+  0x2586 => const _TerminalBlockGlyphSpec([_CellFractionRect(top: 2 / 8)]), // ▆
+  0x2587 => const _TerminalBlockGlyphSpec([_CellFractionRect(top: 1 / 8)]), // ▇
+  0x2588 => const _TerminalBlockGlyphSpec([_fullCell]), // █ full block
+  0x2589 => const _TerminalBlockGlyphSpec([
+    _CellFractionRect(right: 7 / 8),
+  ]), // ▉
+  0x258A => const _TerminalBlockGlyphSpec([
+    _CellFractionRect(right: 6 / 8),
+  ]), // ▊
+  0x258B => const _TerminalBlockGlyphSpec([
+    _CellFractionRect(right: 5 / 8),
+  ]), // ▋
+  0x258C => const _TerminalBlockGlyphSpec([_CellFractionRect(right: 0.5)]), // ▌
+  0x258D => const _TerminalBlockGlyphSpec([
+    _CellFractionRect(right: 3 / 8),
+  ]), // ▍
+  0x258E => const _TerminalBlockGlyphSpec([
+    _CellFractionRect(right: 2 / 8),
+  ]), // ▎
+  0x258F => const _TerminalBlockGlyphSpec([
+    _CellFractionRect(right: 1 / 8),
+  ]), // ▏
+  0x2590 => const _TerminalBlockGlyphSpec([_CellFractionRect(left: 0.5)]), // ▐
+  // Shade blocks — full cell filled at a fraction of the foreground alpha.
+  0x2591 => const _TerminalBlockGlyphSpec([_fullCell], shadeAlpha: 0.25), // ░
+  0x2592 => const _TerminalBlockGlyphSpec([_fullCell], shadeAlpha: 0.5), // ▒
+  0x2593 => const _TerminalBlockGlyphSpec([_fullCell], shadeAlpha: 0.75), // ▓
+  0x2594 => const _TerminalBlockGlyphSpec([
+    _CellFractionRect(bottom: 1 / 8),
+  ]), // ▔
+  0x2595 => const _TerminalBlockGlyphSpec([
+    _CellFractionRect(left: 7 / 8),
+  ]), // ▕
+  // Quadrant blocks (U+2596…U+259F) — the 2×2 sub-cell mosaic TUIs use for
+  // pixel-art banners/logos. Each fills one or more of the four quadrants.
+  0x2596 => const _TerminalBlockGlyphSpec([_quadBottomLeft]), // ▖
+  0x2597 => const _TerminalBlockGlyphSpec([_quadBottomRight]), // ▗
+  0x2598 => const _TerminalBlockGlyphSpec([_quadTopLeft]), // ▘
+  0x2599 => const _TerminalBlockGlyphSpec([
+    _quadTopLeft,
+    _quadBottomLeft,
+    _quadBottomRight,
+  ]), // ▙
+  0x259A => const _TerminalBlockGlyphSpec([
+    _quadTopLeft,
+    _quadBottomRight,
+  ]), // ▚
+  0x259B => const _TerminalBlockGlyphSpec([
+    _quadTopLeft,
+    _quadTopRight,
+    _quadBottomLeft,
+  ]), // ▛
+  0x259C => const _TerminalBlockGlyphSpec([
+    _quadTopLeft,
+    _quadTopRight,
+    _quadBottomRight,
+  ]), // ▜
+  0x259D => const _TerminalBlockGlyphSpec([_quadTopRight]), // ▝
+  0x259E => const _TerminalBlockGlyphSpec([
+    _quadTopRight,
+    _quadBottomLeft,
+  ]), // ▞
+  0x259F => const _TerminalBlockGlyphSpec([
+    _quadTopRight,
+    _quadBottomLeft,
+    _quadBottomRight,
+  ]), // ▟
   _ => null,
 };
 
-final class _TerminalBlockGlyphSpec {
-  const _TerminalBlockGlyphSpec({
-    this.leftFraction = 0,
-    this.topFraction = 0,
-    this.rightFraction = 1,
-    this.bottomFraction = 1,
-    this.shadeAlpha,
+/// A rectangle within a cell, expressed as fractions [0, 1] of the cell's width
+/// and height. The fields are fill BOUNDS, not a side: `(0, 0, 1, 1)` (the
+/// default, [_fullCell]) is the whole cell; `_CellFractionRect(bottom: 0.5)` is
+/// the top half; `_CellFractionRect(left: 0.5)` is the right half.
+class _CellFractionRect {
+  const _CellFractionRect({
+    this.left = 0,
+    this.top = 0,
+    this.right = 1,
+    this.bottom = 1,
   });
 
-  final double leftFraction;
-  final double topFraction;
-  final double rightFraction;
-  final double bottomFraction;
+  final double left;
+  final double top;
+  final double right;
+  final double bottom;
+}
+
+const _fullCell = _CellFractionRect();
+
+final class _TerminalBlockGlyphSpec {
+  const _TerminalBlockGlyphSpec(this.rects, {this.shadeAlpha});
+
+  /// Sub-cell rectangles to fill. Most block glyphs are a single rect; quadrant
+  /// glyphs (U+2596…U+259F) use up to four disjoint rects. A unified list keeps
+  /// half-blocks, eighths, full/shade blocks, and quadrants on one painting
+  /// path (mirrors ghostty's block.zig, which models all of U+2580…259F).
+  final List<_CellFractionRect> rects;
+
+  /// When set, [rects] are filled at this fraction of the foreground alpha
+  /// (the shade blocks ░▒▓).
   final double? shadeAlpha;
 }
 
@@ -5349,4 +6832,325 @@ List<int> _measureTerminalCellWidths(String text, int totalCells) {
   }
 
   return widths;
+}
+
+/// Bridges the platform soft keyboard (IME) to terminal stdin on touch
+/// devices (Android/iOS).
+///
+/// A terminal has no editable document, so there is nothing for a normal
+/// `EditableText` to edit — yet the on-screen keyboard on mobile only appears
+/// when *some* widget attaches a text-input client to the platform. A bare
+/// [FocusNode] gaining focus wires up `HardwareKeyboard` (physical/Bluetooth
+/// keys) but never attaches such a client, so without this bridge mobile users
+/// can focus the terminal but never raise a keyboard to type.
+///
+/// Input is consumed via Flutter's **delta model** ([DeltaTextInputClient],
+/// opted in with `enableDeltaModel: true`): the platform reports each change as
+/// a typed [TextEditingDelta] carrying an explicit *composing* region. That
+/// region is the whole reason to prefer deltas here — while it is active the
+/// IME is mid-word (CJK candidates, glide typing), and forwarding that
+/// provisional text would leak half-typed guesses to the shell. So a delta's
+/// text is forwarded only once its composing region has settled: insertions and
+/// committed replacements become PTY writes, deletions become backspaces, and
+/// embedded newlines become Enter. Between settled events the hidden field is
+/// re-anchored to a fixed zero-width seed so it never empties — an empty field
+/// can't report the *next* backspace (the platform sends no deletion when there
+/// is nothing to delete) — while never surfacing visible text.
+///
+/// The delta path is deliberately incremental — each emission reads the change
+/// the platform described (`textInserted`/`textDeleted`), never a diff of the
+/// local mirror. Re-anchoring is asynchronous, so a keystroke racing an
+/// in-flight re-anchor arrives measured against the IME's older text; trusting
+/// the reported change stays correct there, whereas diffing the whole value
+/// against the seed would read the stale offsets as deletions and backspace
+/// real shell content.
+class _GhosttyTerminalSoftKeyboard with DeltaTextInputClient {
+  _GhosttyTerminalSoftKeyboard({
+    required this.onInsert,
+    required this.onBackspace,
+    required this.onEnter,
+  });
+
+  /// Called with printable text the IME inserted (never contains newlines —
+  /// those are split out to [onEnter]).
+  final void Function(String text) onInsert;
+
+  /// Called once per character the IME deleted.
+  final void Function() onBackspace;
+
+  /// Called when the user commits a line (Return / Go / Send / Done).
+  final void Function() onEnter;
+
+  TextInputConnection? _connection;
+
+  // Zero-width seed: a run of invisible characters kept before the caret as
+  // "deletion fuel". An empty field reports no deletion, so without content a
+  // backspace on an already-empty line is silently dropped. The run is
+  // deliberately generous (not 1-2 chars) so a single frame that batches
+  // several deletions \u2014 a keyboard word-delete or a held-backspace burst \u2014
+  // still yields one backspace per removed char instead of bottoming out at the
+  // field start. The field is re-seeded every settled frame, so this length is
+  // only the *per-frame* bound; a delete larger than the seed is still capped.
+  static const int _seedRune = 0x200b; // zero-width space
+  static const int _seedLength = 64;
+  static final String _seed = String.fromCharCode(_seedRune) * _seedLength;
+  static final TextEditingValue _seedValue = TextEditingValue(
+    text: _seed,
+    selection: const TextSelection.collapsed(offset: _seedLength),
+  );
+
+  /// Local mirror of the hidden field, advanced by each delta's `apply` so the
+  /// re-anchor decision can read the settled composing region.
+  TextEditingValue _value = _seedValue;
+
+  bool get _isAttached => _connection?.attached ?? false;
+
+  /// Whether the IME bridge currently owns input (attached to the platform).
+  /// Read by the view's raw-key handler to avoid double-applying keys the IME
+  /// also delivers.
+  bool get isActive => _isAttached;
+
+  /// Whether [range] denotes an active composing span (valid and non-empty).
+  static bool _isComposing(TextRange range) =>
+      range.isValid && !range.isCollapsed;
+
+  void show() {
+    final wasAttached = _isAttached;
+    if (!wasAttached) {
+      _connection = TextInput.attach(
+        this,
+        const TextInputConfiguration(
+          // Structured per-change deltas with explicit composing regions —
+          // required for the composing-aware forwarding below.
+          enableDeltaModel: true,
+          // Terminals must see raw keystrokes: kill autocorrect, suggestions,
+          // autocapitalization, and smart dashes/quotes so nothing rewrites
+          // what the user typed before it reaches the shell. Multiline keeps a
+          // Return key (translated to Enter) rather than a Go/Done button.
+          inputType: TextInputType.multiline,
+          inputAction: TextInputAction.newline,
+          autocorrect: false,
+          enableSuggestions: false,
+          smartDashesType: SmartDashesType.disabled,
+          smartQuotesType: SmartQuotesType.disabled,
+          textCapitalization: TextCapitalization.none,
+          keyboardAppearance: Brightness.dark,
+        ),
+      );
+    }
+    // Seed the field only on a fresh attach or when nothing is being composed.
+    // show() is re-invoked on every terminal tap (to re-raise a Back-dismissed
+    // keyboard); re-seeding then would clear an in-progress composing region —
+    // e.g. tapping to scroll mid-pinyin would drop the candidate word.
+    if (!wasAttached || !_isComposing(_value.composing)) {
+      _value = _seedValue;
+      _connection!.setEditingState(_seedValue);
+    }
+    _connection!.show();
+  }
+
+  void hide() {
+    _connection?.close();
+    _connection = null;
+  }
+
+  @override
+  TextEditingValue? get currentTextEditingValue => _value;
+
+  @override
+  void updateEditingValueWithDeltas(List<TextEditingDelta> deltas) {
+    for (final delta in deltas) {
+      final priorComposing = _value.composing;
+      _value = delta.apply(_value);
+
+      // Selection/caret-only change (handle drag, cursor move): normally no
+      // bytes. But an IME can *commit* a composition by merely clearing its
+      // composing region with no accompanying insertion/replacement — the
+      // provisional text was inserted earlier (and held) and is now simply
+      // accepted as-is. When this clear ends an active composition, that text
+      // is final and no other delta will carry it, so emit it here or it is
+      // lost. (A commit that also *changes* the text arrives as a replacement,
+      // handled below.)
+      if (delta is TextEditingDeltaNonTextUpdate) {
+        if (_isComposing(priorComposing) && !_isComposing(delta.composing)) {
+          _emitText(priorComposing.textInside(delta.oldText));
+        }
+        continue;
+      }
+      // Mid-composition (CJK, glide typing, candidate list): the text is still
+      // provisional. Hold — it is emitted once the composing region settles.
+      if (_isComposing(delta.composing)) {
+        continue;
+      }
+
+      if (delta is TextEditingDeltaInsertion) {
+        // An insertion whose composing region is (already) empty is committed
+        // per the input protocol, so it is emitted immediately. Known
+        // limitation: an IME that opens its composing region only on the
+        // *second* keystroke would leak the first character to the shell. We
+        // can't tell "committed" from "about to compose" without deferring
+        // every keystroke by a frame — unacceptable typing latency — so we
+        // accept it. Disabling suggestions/autocorrect (see the config in
+        // show()) removes the usual trigger for late composing, and CJK IMEs
+        // open composing on keystroke 1, so both common cases are unaffected.
+        _emitText(delta.textInserted);
+      } else if (delta is TextEditingDeltaReplacement) {
+        // A settled replacement is a committed IME word / suggestion; the
+        // provisional text was never forwarded, so emit only the final text.
+        _emitText(delta.replacementText);
+      } else if (delta is TextEditingDeltaDeletion) {
+        // Count seed runes only, not String.length. Two reasons:
+        //  - String.length is UTF-16 code units, so an astral char (emoji, CJK
+        //    ext) would over-count and send an extra backspace.
+        //  - Only seed chars stand in for already-committed terminal text.
+        //    Deleting provisional/composing text (non-seed, never forwarded)
+        //    must send nothing — else we'd backspace real shell content.
+        var count = 0;
+        for (final rune in delta.textDeleted.runes) {
+          if (rune == _seedRune) count++;
+        }
+        for (var i = 0; i < count; i++) {
+          onBackspace();
+        }
+      }
+    }
+
+    // Re-anchor to the seed once composition has fully settled so the field
+    // never empties and offsets stay trivial between events. Leaving it alone
+    // mid-composition keeps the IME's provisional region intact.
+    if (_isAttached && !_isComposing(_value.composing)) {
+      _value = _seedValue;
+      _connection!.setEditingState(_seedValue);
+    }
+  }
+
+  /// Whole-value fallback: required by [TextInputClient], and reached only if
+  /// an engine ignores `enableDeltaModel` and pushes complete editing values.
+  /// No shipping target does — the bridge attaches on Android/iOS only, and
+  /// both implement the delta channel — so this is defensive: it degrades to
+  /// unstructured input rather than silently dropping every keystroke.
+  ///
+  /// Diffs against the seed by common prefix/suffix, holding provisional text
+  /// on the same rule as the delta path.
+  @override
+  void updateEditingValue(TextEditingValue value) {
+    // Mid-composition the text is provisional, so hold it and leave the field
+    // untouched — re-anchoring here would destroy the IME's composing region.
+    // The settled value carries the committed text, and it is diffed from the
+    // same seed, so nothing is lost by waiting.
+    if (_isComposing(value.composing)) {
+      _value = value;
+      return;
+    }
+
+    final next = value.text;
+    var prefix = 0;
+    final maxPrefix = math.min(_seed.length, next.length);
+    while (prefix < maxPrefix &&
+        _seed.codeUnitAt(prefix) == next.codeUnitAt(prefix)) {
+      prefix++;
+    }
+    var suffix = 0;
+    final maxSuffix = math.min(_seed.length - prefix, next.length - prefix);
+    while (suffix < maxSuffix &&
+        _seed.codeUnitAt(_seed.length - 1 - suffix) ==
+            next.codeUnitAt(next.length - 1 - suffix)) {
+      suffix++;
+    }
+    final removed = _seed.length - prefix - suffix;
+    final inserted = next.substring(prefix, next.length - suffix);
+
+    for (var i = 0; i < removed; i++) {
+      onBackspace();
+    }
+    if (inserted.isNotEmpty) {
+      _emitText(inserted);
+    }
+
+    // Re-anchor so the following value is measured from the same seed.
+    _value = _seedValue;
+    _connection?.setEditingState(_seedValue);
+  }
+
+  void _emitText(String text) {
+    final buffer = StringBuffer();
+    void flush() {
+      if (buffer.isNotEmpty) {
+        onInsert(buffer.toString());
+        buffer.clear();
+      }
+    }
+
+    for (final rune in text.runes) {
+      // Soft-keyboard Return arrives as a newline inside the inserted text
+      // under multiline input; forward it as a real Enter key press.
+      if (rune == 0x0a || rune == 0x0d) {
+        flush();
+        onEnter();
+      } else {
+        buffer.writeCharCode(rune);
+      }
+    }
+    flush();
+  }
+
+  @override
+  void performAction(TextInputAction action) {
+    switch (action) {
+      // `newline` is intentionally absent: under multiline input Return arrives
+      // as a newline insertion delta (handled in _emitText); firing onEnter
+      // here too would double it. These are the single-line action variants.
+      case TextInputAction.done:
+      case TextInputAction.go:
+      case TextInputAction.send:
+      case TextInputAction.next:
+      case TextInputAction.search:
+        onEnter();
+      default:
+        break;
+    }
+  }
+
+  @override
+  void connectionClosed() {
+    _connection = null;
+  }
+
+  // Remaining TextInputClient surface is inert: a terminal has no document
+  // model, floating cursor, autofill scope, placeholder, or toolbar.
+  @override
+  AutofillScope? get currentAutofillScope => null;
+
+  @override
+  void performPrivateCommand(String action, Map<String, dynamic> data) {}
+
+  @override
+  void updateFloatingCursor(RawFloatingCursorPoint point) {}
+
+  @override
+  void showAutocorrectionPromptRect(int start, int end) {}
+
+  @override
+  void insertTextPlaceholder(Size size) {}
+
+  @override
+  void removeTextPlaceholder() {}
+
+  @override
+  void showToolbar() {}
+
+  @override
+  void performSelector(String selectorName) {}
+
+  @override
+  void didChangeInputControl(
+    TextInputControl? oldControl,
+    TextInputControl? newControl,
+  ) {}
+
+  @override
+  void insertContent(KeyboardInsertedContent content) {}
+
+  @override
+  bool onFocusReceived() => false;
 }

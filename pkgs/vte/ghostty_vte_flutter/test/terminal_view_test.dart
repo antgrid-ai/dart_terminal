@@ -3445,7 +3445,7 @@ void main() {
     );
 
     testWidgets(
-      'terminalMouseFirst policy forwards touch as terminal mouse events',
+      'touch tap forwards a left click (press + release) to the TUI',
       (tester) async {
         final controller = _RecordingTerminalController();
         addTearDown(controller.dispose);
@@ -3473,14 +3473,23 @@ void main() {
         );
         await tester.pumpAndSettle();
 
-        final gesture = await tester.startGesture(const Offset(100, 100));
-        await tester.pump();
-        await gesture.moveTo(const Offset(140, 120));
+        // A tap = down + up with no movement. The PRESS is deferred to pointer
+        // up so a swipe can scroll instead — a completed tap emits a click.
+        final gesture = await tester.createGesture(
+          kind: ui.PointerDeviceKind.touch,
+        );
+        await gesture.down(const Offset(100, 100));
         await tester.pump();
         await gesture.up();
         await tester.pump(const Duration(milliseconds: 300));
 
-        expect(controller.mouseEvents, isNotEmpty);
+        expect(
+          controller.mouseEvents.map((event) => event.action),
+          containsAllInOrder(<GhosttyMouseAction>[
+            GhosttyMouseAction.GHOSTTY_MOUSE_ACTION_PRESS,
+            GhosttyMouseAction.GHOSTTY_MOUSE_ACTION_RELEASE,
+          ]),
+        );
         expect(
           controller.mouseEvents.first.button,
           GhosttyMouseButton.GHOSTTY_MOUSE_BUTTON_LEFT,
@@ -3490,7 +3499,61 @@ void main() {
     );
 
     testWidgets(
-      'terminalMouseFirst policy releases terminal mouse on touch cancel',
+      'touch swipe forwards scroll-wheel events (not a click-drag) to the TUI',
+      (tester) async {
+        final controller = _RecordingTerminalController();
+        addTearDown(controller.dispose);
+
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(
+              body: SizedBox(
+                width: 600,
+                height: 400,
+                child: GhosttyTerminalView(
+                  controller: controller,
+                  autofocus: true,
+                  interactionPolicy:
+                      GhosttyTerminalInteractionPolicy.terminalMouseFirst,
+                ),
+              ),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        // Swipe down by more than one line: expect wheel-up (button 4), the
+        // history-scroll direction, and NO left-button drag. Delivered as
+        // several frames (a real swipe is many move events, not one jump): wheel
+        // forwarding waits for the in-arena vertical claimer to win, which
+        // resolves after the first past-slop move — the out-of-arena Listener
+        // sees that move before the claimer does within the same event.
+        final gesture = await tester.createGesture(
+          kind: ui.PointerDeviceKind.touch,
+        );
+        await gesture.down(const Offset(100, 100));
+        await tester.pump();
+        for (var i = 0; i < 8; i++) {
+          await gesture.moveBy(const Offset(0, 10));
+          await tester.pump();
+        }
+        await gesture.up();
+        await tester.pump(const Duration(milliseconds: 300));
+
+        expect(controller.mouseEvents, isNotEmpty);
+        final buttons = controller.mouseEvents
+            .map((event) => event.button)
+            .toSet();
+        expect(buttons, contains(GhosttyMouseButton.GHOSTTY_MOUSE_BUTTON_FOUR));
+        expect(
+          buttons,
+          isNot(contains(GhosttyMouseButton.GHOSTTY_MOUSE_BUTTON_LEFT)),
+        );
+      },
+    );
+
+    testWidgets(
+      'touch cancel forwards nothing (deferred press was never sent)',
       (tester) async {
         final controller = _RecordingTerminalController();
         addTearDown(controller.dispose);
@@ -3521,13 +3584,9 @@ void main() {
         await gesture.cancel();
         await tester.pump(const Duration(milliseconds: 300));
 
-        expect(
-          controller.mouseEvents.map((event) => event.action),
-          containsAllInOrder(<GhosttyMouseAction>[
-            GhosttyMouseAction.GHOSTTY_MOUSE_ACTION_PRESS,
-            GhosttyMouseAction.GHOSTTY_MOUSE_ACTION_RELEASE,
-          ]),
-        );
+        // No press fired on down, so a cancel has nothing to release — a
+        // never-completed tap must not leave a stuck button in the TUI.
+        expect(controller.mouseEvents, isEmpty);
       },
     );
 
