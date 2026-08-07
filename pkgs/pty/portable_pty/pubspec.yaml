@@ -6,9 +6,9 @@ description: >-
   WebTransport to a remote PTY server on web.
 version: 0.0.6
 
-repository: https://github.com/kingwill101/dart_terminal/tree/master/pkgs/pty/portable_pty
-homepage: https://github.com/kingwill101/dart_terminal
-issue_tracker: https://github.com/kingwill101/dart_terminal/issues
+repository: https://github.com/bharathm03/dart_terminal/tree/master/pkgs/pty/portable_pty
+homepage: https://github.com/bharathm03/dart_terminal
+issue_tracker: https://github.com/bharathm03/dart_terminal/issues
 
 topics:
   - terminal

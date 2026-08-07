@@ -1,8 +1,42 @@
-# dart_terminal
+# dart_terminal (Antgrid fork)
 
-[![Analyze](https://github.com/kingwill101/dart_terminal/actions/workflows/analyze.yml/badge.svg)](https://github.com/kingwill101/dart_terminal/actions/workflows/analyze.yml)
-[![VTE](https://github.com/kingwill101/dart_terminal/actions/workflows/vte.yml/badge.svg)](https://github.com/kingwill101/dart_terminal/actions/workflows/vte.yml)
-[![PTY](https://github.com/kingwill101/dart_terminal/actions/workflows/pty.yml/badge.svg)](https://github.com/kingwill101/dart_terminal/actions/workflows/pty.yml)
+[![Analyze](https://github.com/bharathm03/dart_terminal/actions/workflows/analyze.yml/badge.svg)](https://github.com/bharathm03/dart_terminal/actions/workflows/analyze.yml)
+[![VTE](https://github.com/bharathm03/dart_terminal/actions/workflows/vte.yml/badge.svg)](https://github.com/bharathm03/dart_terminal/actions/workflows/vte.yml)
+[![PTY](https://github.com/bharathm03/dart_terminal/actions/workflows/pty.yml/badge.svg)](https://github.com/bharathm03/dart_terminal/actions/workflows/pty.yml)
+
+> **This is a fork of [kingwill101/dart_terminal](https://github.com/kingwill101/dart_terminal),**
+> branched at `d9d3096` and maintained for Antgrid. **Use upstream unless you
+> need one of the changes below.** Issues and pull requests here are triaged on
+> Antgrid's schedule; no support is promised to anyone else.
+>
+> Prebuilt native libraries still come from **upstream's** releases — this fork
+> publishes none of its own, and the downloaders in `tool/` and each package's
+> `bin/setup.dart` point at `kingwill101/dart_terminal` by design.
+
+### What's different from upstream
+
+- **`ghostty_vte` — regenerated FFI bindings.** Published 0.1.4 shipped bindings
+  generated before the vendored ghostty submodule was bumped, so
+  `GhosttyFormatterTerminalOptions` is missing its trailing `selection` field.
+  The C API passes that struct **by value**, so the callee reads the absent field
+  from uninitialised heap, takes the branch, and builds a selection from wild
+  pointers — the formatter segfaults on every call. This also adds the
+  `ffigen.yaml` that was never checked in, which is why the bindings drifted at
+  all. **Affects every 0.1.4 consumer, not only Antgrid.**
+- **`ghostty_vte_flutter` — Antgrid's terminal engine and rendering patches.**
+
+### Known-failing tests
+
+`VTE / test-flutter` reports **5 failures**, all in the DEC-1004 focus-reporting
+group. They reach the native engine ungated, and `flutter test` does not resolve
+this package's native assets, so they cannot pass under `flutter_tester` on any
+host.
+
+The other native-dependent tests are green here for a reason worth knowing: they
+guard with an early `return` *inside the test body*, which reports **passed**,
+not skipped. The engine is genuinely exercised only by `dart test` in
+`pkgs/vte/ghostty_vte` — which CI does not run, because `test-native` is
+`if: false` upstream. Treat a green VTE badge accordingly.
 
 Dart & Flutter packages for building terminal applications. This monorepo
 provides two complementary package groups — a **VT engine** powered by
@@ -19,10 +53,13 @@ fully functional terminal in any Dart or Flutter app.
 | [`portable_pty`](pkgs/pty/portable_pty/) | [![pub](https://img.shields.io/pub/v/portable_pty.svg)](https://pub.dev/packages/portable_pty) | Cross-platform PTY — native shells on desktop, WebSocket/WebTransport on web |
 | [`portable_pty_flutter`](pkgs/pty/portable_pty_flutter/) | [![pub](https://img.shields.io/pub/v/portable_pty_flutter.svg)](https://pub.dev/packages/portable_pty_flutter) | Flutter `ChangeNotifier` controller for PTY sessions |
 
+The pub.dev badges track **upstream's** published versions. This fork is not
+published to pub.dev — consume it as a git dependency.
+
 ## Quick start
 
 ```bash
-git clone https://github.com/kingwill101/dart_terminal.git
+git clone https://github.com/bharathm03/dart_terminal.git
 cd dart_terminal
 git submodule update --init --recursive
 flutter pub get
@@ -120,4 +157,9 @@ dart_terminal/
 
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE). Upstream's copyright is retained alongside this
+fork's; both notices must survive in any copy.
+
+The vendored Ghostty source under
+`pkgs/vte/ghostty_vte/third_party/ghostty/` is separately MIT-licensed by
+Mitchell Hashimoto and the Ghostty contributors, and carries its own `LICENSE`.
