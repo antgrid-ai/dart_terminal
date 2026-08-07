@@ -3,7 +3,7 @@ description: >-
   Flutter controller and widgets for portable PTY sessions.
   Wraps portable_pty behind a ChangeNotifier for reactive terminal UIs
   on native and web.
-version: 0.0.6
+version: 0.0.6+antgrid.1
 
 repository: https://github.com/bharathm03/dart_terminal/tree/master/pkgs/pty/portable_pty_flutter
 homepage: https://github.com/bharathm03/dart_terminal

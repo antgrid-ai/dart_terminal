@@ -14,6 +14,13 @@ source:
 
 release:
   provider: github
+  # Deliberately still upstream's, even though the pubspec now carries
+  # `+antgrid.1`. This fork's changes to ghostty_vte are Dart-only (regenerated
+  # ffigen bindings and their call sites) and touch nothing that feeds this
+  # artifact — same ghostty revision, same build flags — so upstream's binary is
+  # the correct one. Aligning the tag to the pubspec version would mean cutting
+  # a fork VTE release that only duplicates it. Keep in lockstep with
+  # `releaseTag` in lib/src/hook/asset_hashes.dart, which pins the same tag.
   repository: kingwill101/dart_terminal
   tag: ghostty_vte-v0.1.4
 
