@@ -88,19 +88,22 @@ jobs:
             cross: true
 
           # ── iOS (from macOS) ──
+          # The dylib, not the .a: Flutter's iOS native-assets driver only
+          # accepts DynamicLoadingBundled. See native_prebuilt.yaml's iOS
+          # recipes for why a static payload fails the archive.
           - runner: macos-latest
             rust_target: aarch64-apple-ios
-            artifact: libportable_pty_rs.a
+            artifact: libportable_pty_rs.dylib
             os_label: ios-arm64
             cross: false
           - runner: macos-latest
             rust_target: aarch64-apple-ios-sim
-            artifact: libportable_pty_rs.a
+            artifact: libportable_pty_rs.dylib
             os_label: ios-sim-arm64
             cross: false
           - runner: macos-latest
             rust_target: x86_64-apple-ios
-            artifact: libportable_pty_rs.a
+            artifact: libportable_pty_rs.dylib
             os_label: ios-sim-x64
             cross: false
 

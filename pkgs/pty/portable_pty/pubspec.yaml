@@ -10,7 +10,7 @@ description: >-
 # consumers are unaffected — which is why this cannot be `-antgrid.1`, a semver
 # pre-release that `^0.0.6` would refuse. The release tag carries the same
 # suffix; see native_prebuilt.yaml for why it must not use a dash either.
-version: 0.0.6+antgrid.1
+version: 0.0.6+antgrid.2
 
 repository: https://github.com/bharathm03/dart_terminal/tree/master/pkgs/pty/portable_pty
 homepage: https://github.com/bharathm03/dart_terminal

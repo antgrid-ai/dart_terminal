@@ -53,7 +53,7 @@ void main() {
   });
 
   group('portablePtyLinkModeForBuild', () {
-    test('uses static libraries for iOS device builds', () async {
+    test('uses dynamic libraries for iOS device builds', () async {
       await testCodeBuildHook(
         mainMethod: _noopBuildHook,
         targetOS: OS.iOS,
@@ -62,14 +62,20 @@ void main() {
         linkModePreference: LinkModePreference.preferDynamic,
         check: (input, output) {
           final code = input.config.code;
-          expect(portablePtyLinkModeForBuild(code), isA<StaticLinking>());
-          expect(portablePtyLibraryNameForBuild(code), 'libportable_pty_rs.a');
+          expect(
+            portablePtyLinkModeForBuild(code),
+            isA<DynamicLoadingBundled>(),
+          );
+          expect(
+            portablePtyLibraryNameForBuild(code),
+            'libportable_pty_rs.dylib',
+          );
           expect(portablePtyPlatformLabelForBuild(code), 'ios-arm64');
         },
       );
     });
 
-    test('uses static libraries for iOS simulator builds', () async {
+    test('uses dynamic libraries for iOS simulator builds', () async {
       await testCodeBuildHook(
         mainMethod: _noopBuildHook,
         targetOS: OS.iOS,
@@ -78,14 +84,22 @@ void main() {
         linkModePreference: LinkModePreference.preferDynamic,
         check: (input, output) {
           final code = input.config.code;
-          expect(portablePtyLinkModeForBuild(code), isA<StaticLinking>());
-          expect(portablePtyLibraryNameForBuild(code), 'libportable_pty_rs.a');
+          expect(
+            portablePtyLinkModeForBuild(code),
+            isA<DynamicLoadingBundled>(),
+          );
+          expect(
+            portablePtyLibraryNameForBuild(code),
+            'libportable_pty_rs.dylib',
+          );
           expect(portablePtyPlatformLabelForBuild(code), 'ios-sim-arm64');
         },
       );
     });
 
-    test('coerces explicit iOS dynamic preferences to static', () async {
+    // Flutter's iOS driver sends exactly this preference, and honouring it is
+    // what keeps the archive from failing on a static CodeAsset.
+    test('honours an explicit iOS dynamic preference', () async {
       for (final targetSdk in [IOSSdk.iPhoneOS, IOSSdk.iPhoneSimulator]) {
         await testCodeBuildHook(
           mainMethod: _noopBuildHook,
@@ -95,14 +109,32 @@ void main() {
           linkModePreference: LinkModePreference.dynamic,
           check: (input, output) {
             final code = input.config.code;
-            expect(portablePtyLinkModeForBuild(code), isA<StaticLinking>());
+            expect(
+              portablePtyLinkModeForBuild(code),
+              isA<DynamicLoadingBundled>(),
+            );
             expect(
               portablePtyLibraryNameForBuild(code),
-              'libportable_pty_rs.a',
+              'libportable_pty_rs.dylib',
             );
           },
         );
       }
+    });
+
+    test('respects an explicit iOS static preference', () async {
+      await testCodeBuildHook(
+        mainMethod: _noopBuildHook,
+        targetOS: OS.iOS,
+        targetArchitecture: Architecture.arm64,
+        targetIOSSdk: IOSSdk.iPhoneOS,
+        linkModePreference: LinkModePreference.static,
+        check: (input, output) {
+          final code = input.config.code;
+          expect(portablePtyLinkModeForBuild(code), isA<StaticLinking>());
+          expect(portablePtyLibraryNameForBuild(code), 'libportable_pty_rs.a');
+        },
+      );
     });
 
     test('uses dynamic libraries for non-iOS preferDynamic', () async {

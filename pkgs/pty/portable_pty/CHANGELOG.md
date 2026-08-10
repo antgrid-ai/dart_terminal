@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.0.6+antgrid.2
+
+- iOS prebuilts ship a dylib instead of a static archive, and the build hook no
+  longer forces static linking on iOS. Flutter's iOS native-assets driver
+  requests a dynamic link-mode preference and rejects a static code asset, so
+  the static payload failed every iOS archive with "link mode static not allowed
+  by preference dynamic".
+
 ## 0.0.6
 
 - Migrated native builds and prebuilt resolution to the declarative

@@ -21,14 +21,12 @@ const Map<String, String> portablePtyPrebuiltArtifacts = {
 
 /// Returns the link mode used for the portable_pty native asset.
 ///
-/// iOS native assets must be linked statically, and the PTY release artifacts
-/// for iOS are static Rust archives. Other platforms respect the requested
-/// build-hook link-mode preference.
+/// Every target, iOS included, honours the requested build-hook preference.
+/// iOS is not a static special case: Flutter's iOS native-assets driver
+/// requests `dynamic` and rejects a static CodeAsset, so forcing
+/// [StaticLinking] there fails the archive with "link mode static not allowed
+/// by preference dynamic". The iOS release artifacts are dylibs to match.
 LinkMode portablePtyLinkModeForBuild(CodeConfig code) {
-  if (code.targetOS == OS.iOS) {
-    return StaticLinking();
-  }
-
   return switch (code.linkModePreference) {
     LinkModePreference.dynamic ||
     LinkModePreference.preferDynamic => DynamicLoadingBundled(),
