@@ -35,7 +35,7 @@ dependencies:
   code_assets: ^1.0.0
   ffi: ^2.2.0
   hooks: ^2.1.0
-  native_prebuilt: ^0.3.2
+  native_prebuilt: ^0.4.0
   web: ^1.1.1
 
 dev_dependencies:
