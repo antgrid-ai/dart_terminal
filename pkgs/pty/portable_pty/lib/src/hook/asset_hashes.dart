@@ -6,7 +6,7 @@
 // dart format off
 
 /// The GitHub release tag from which prebuilt binaries are downloaded.
-const String releaseTag = 'portable_pty-v0.0.6+antgrid.1';
+const String releaseTag = 'portable_pty-v0.0.6+antgrid.2';
 
 /// Maps platform labels to artifact info and SHA256 hashes.
 const Map<String, AssetHash> assetHashes = {
@@ -28,11 +28,11 @@ const Map<String, AssetHash> assetHashes = {
   ),
   'windows-x64': AssetHash(
     tarball: 'pty-windows-x64.tar.gz',
-    hash: '6e185532b14c866b31850773f82ca22dc2b37e95debf8948347b9009feefae71',
+    hash: 'be4de0e76bdd9609bb7854b94fd0529c4c602498afe6a7ac2737c57c871cfd59',
   ),
   'windows-arm64': AssetHash(
     tarball: 'pty-windows-arm64.tar.gz',
-    hash: '6a853e88f0de9f5f7a4aeb6afa16839dcaca58dc2899c88a1f4d2881edd9814e',
+    hash: '9ca7461d5074c54a7ab0a950b32d408c034f6fb70771a12aa6ab977a154c9d58',
   ),
   'android-arm64': AssetHash(
     tarball: 'pty-android-arm64.tar.gz',
@@ -48,15 +48,15 @@ const Map<String, AssetHash> assetHashes = {
   ),
   'ios-arm64': AssetHash(
     tarball: 'pty-ios-arm64.tar.gz',
-    hash: 'b883e148b6cb30870fa6fc60fa8f59f60f581ccb65bf436f5c68f082498ecb96',
+    hash: '20f2c79ffcca3579dd8c406e5bf399a49aa9b1cb355ef217b66053dc6a681992',
   ),
   'ios-sim-arm64': AssetHash(
     tarball: 'pty-ios-sim-arm64.tar.gz',
-    hash: '445f5f61ec6b3319437b9ce995c93bb04b56f75c5d2f7373f374f8fffc03f59f',
+    hash: '2e5df92546c4698d2b85fded9fc32422aab436fa8578dc5b8c2737d3920c7db3',
   ),
   'ios-sim-x64': AssetHash(
     tarball: 'pty-ios-sim-x64.tar.gz',
-    hash: '45cf8c3cdf340cc2d1560c8ba76a434d29333e5aa42920294573afb12802f4cc',
+    hash: 'c85c0d56ba95bb29bc01517743e1d5aab54a473f2a497fbee58db343041389c3',
   ),
 };
 
