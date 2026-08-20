@@ -1148,6 +1148,61 @@ void main() {
     expect(terminal.scrollbackRows, 0);
   });
 
+  test('maxScrollbackLines holds a row budget across terminal widths', () {
+    // The byte budget cannot express "N rows": the same history costs about
+    // 2.5x more at 202 columns than at 80, so a byte number sized for a narrow
+    // terminal silently truncates a wide one. The row budget must not.
+    int retainedAt(int cols) {
+      final terminal = GhosttyVt.newTerminal(
+        cols: cols,
+        rows: 49,
+        maxScrollback: 256 << 20,
+        maxScrollbackLines: 4000,
+      );
+      addTearDown(terminal.close);
+
+      final formatter = terminal.createFormatter();
+      addTearDown(formatter.close);
+
+      final pad = 'x' * (cols ~/ 2);
+      for (var i = 0; i < 9000; i++) {
+        terminal.write('line $i $pad\r\n');
+      }
+      return formatter.formatText().split('\n').length;
+    }
+
+    final narrow = retainedAt(80);
+    final wide = retainedAt(202);
+
+    // Page-granular: whole historical pages are dropped, so the budget is
+    // approached from below by up to about one page of rows. That deficit is
+    // the only width sensitivity left, and it is bounded rather than
+    // proportional.
+    expect(narrow, greaterThan(3000));
+    expect(narrow, lessThanOrEqualTo(4000 + 49));
+    expect(wide, greaterThan(3000));
+    expect(wide, lessThanOrEqualTo(4000 + 49));
+  });
+
+  test('the byte budget still binds when it is the tighter of the two', () {
+    final terminal = GhosttyVt.newTerminal(
+      cols: 80,
+      rows: 24,
+      maxScrollback: 1 << 20,
+      maxScrollbackLines: 100000,
+    );
+    addTearDown(terminal.close);
+
+    final formatter = terminal.createFormatter();
+    addTearDown(formatter.close);
+
+    for (var i = 0; i < 20000; i++) {
+      terminal.write('line $i\r\n');
+    }
+
+    expect(formatter.formatText().split('\n').length, lessThan(20000));
+  });
+
   test('widthPx and heightPx reflect pixel dimensions from resize', () {
     final terminal = GhosttyVt.newTerminal(cols: 80, rows: 24);
     addTearDown(terminal.close);

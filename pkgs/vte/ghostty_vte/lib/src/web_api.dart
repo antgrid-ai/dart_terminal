@@ -3094,11 +3094,21 @@ final class VtMouseEncoderOptions {
 }
 
 final class VtTerminal {
-  VtTerminal({required int cols, required int rows, int maxScrollback = 10_000})
-    : _cols = _checkPositiveUint16(cols, 'cols'),
-      _rows = _checkPositiveUint16(rows, 'rows'),
-      _maxScrollback = _checkNonNegative(maxScrollback, 'maxScrollback'),
-      _wasm = _requireTerminalRuntime('VtTerminal') {
+  VtTerminal({
+    required int cols,
+    required int rows,
+    int maxScrollback = 10_000,
+    int? maxScrollbackLines,
+  }) : _cols = _checkPositiveUint16(cols, 'cols'),
+       _rows = _checkPositiveUint16(rows, 'rows'),
+       _maxScrollback = _checkNonNegative(maxScrollback, 'maxScrollback'),
+       _wasm = _requireTerminalRuntime('VtTerminal') {
+    // The wasm build still takes its limits through the options struct, which
+    // carries bytes only; there is no terminal_set export to reach the row
+    // budget with.
+    if (maxScrollbackLines != null) {
+      _unsupportedTerminalApi('VtTerminal.maxScrollbackLines');
+    }
     final out = _allocOpaqueOrThrow(_wasm, 'ghostty_wasm_alloc_opaque');
     final optionsPtr = _allocU8ArrayOrThrow(
       _wasm,
@@ -3236,6 +3246,12 @@ final class VtTerminal {
   int get maxScrollback {
     _ensureOpen();
     return _maxScrollback;
+  }
+
+  /// Always null on web: the wasm build has no row budget to report.
+  int? get maxScrollbackLines {
+    _ensureOpen();
+    return null;
   }
 
   int get cursorX {
@@ -3977,7 +3993,13 @@ final class GhosttyVt {
     required int cols,
     required int rows,
     int maxScrollback = 10_000,
-  }) => VtTerminal(cols: cols, rows: rows, maxScrollback: maxScrollback);
+    int? maxScrollbackLines,
+  }) => VtTerminal(
+    cols: cols,
+    rows: rows,
+    maxScrollback: maxScrollback,
+    maxScrollbackLines: maxScrollbackLines,
+  );
 
   static bool _buildInfoBool(_GhosttyWasmRuntime rt, int data) {
     final out = rt.allocU8();

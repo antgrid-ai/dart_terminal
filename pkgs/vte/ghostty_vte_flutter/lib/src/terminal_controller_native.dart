@@ -26,23 +26,38 @@ class GhosttyTerminalController extends ChangeNotifier
     implements GhosttyTerminalSessionController {
   GhosttyTerminalController({
     this.maxLines = 2000,
-    this.maxScrollback = 10_000,
+    this.maxScrollback = 64 << 20,
+    int? maxScrollbackLines,
     this.initialCols = 80,
     this.initialRows = 24,
     this.preferPty = true,
     this.defaultShell,
   }) : assert(maxLines > 0),
        assert(maxScrollback >= 0),
+       assert(maxScrollbackLines == null || maxScrollbackLines >= 0),
        assert(initialCols > 0),
        assert(initialRows > 0),
+       maxScrollbackLines = maxScrollbackLines ?? maxLines,
        _cols = initialCols,
        _rows = initialRows;
 
   /// Maximum retained line count in the formatted terminal snapshot.
   final int maxLines;
 
-  /// Maximum terminal scrollback depth retained by [VtTerminal].
+  /// Maximum scrollback the engine retains, in BYTES, not lines.
+  ///
+  /// It is a memory ceiling, and it binds independently of
+  /// [maxScrollbackLines] — whichever runs out first wins. Sizing it is
+  /// width-dependent: a 10k-row history costs roughly 7 MB at 80 columns and
+  /// 17 MB at 202, so a budget that looks generous for a narrow terminal
+  /// quietly truncates a wide one. Express the intent in
+  /// [maxScrollbackLines] and leave this as headroom.
   final int maxScrollback;
+
+  /// Maximum scrollback the engine retains, in rows. Defaults to [maxLines]:
+  /// the transcript cannot show history the engine has already dropped, so the
+  /// two budgets meaning different things is always a bug.
+  final int maxScrollbackLines;
 
   /// Initial terminal width in cells before the view reports a real size.
   final int initialCols;
@@ -386,6 +401,7 @@ class GhosttyTerminalController extends ChangeNotifier
       cols: _cols,
       rows: _rows,
       maxScrollback: maxScrollback,
+      maxScrollbackLines: maxScrollbackLines,
     );
 
     // Forward terminal write-back data (DSR responses, mode queries, etc.)
