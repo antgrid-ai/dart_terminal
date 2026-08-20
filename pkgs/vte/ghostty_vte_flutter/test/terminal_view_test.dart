@@ -248,7 +248,7 @@ void main() {
           ),
         );
         await tester.pumpAndSettle();
-        final formatterStats = await _captureTerminalPaintStats(formatterKey);
+        final formatterStats = await _captureTerminalPaintStats(tester, formatterKey);
 
         final renderStateKey = GlobalKey();
         await tester.pumpWidget(
@@ -262,7 +262,7 @@ void main() {
           ),
         );
         await tester.pumpAndSettle();
-        final renderStateStats = await _captureTerminalPaintStats(
+        final renderStateStats = await _captureTerminalPaintStats(tester, 
           renderStateKey,
         );
 
@@ -312,7 +312,7 @@ void main() {
         );
         await tester.pumpAndSettle();
 
-        final image = await _captureTerminalImageData(key);
+        final image = await _captureTerminalImageData(tester, key);
 
         expect(
           _pixelMatchesColor(
@@ -378,7 +378,7 @@ void main() {
         );
         await tester.pumpAndSettle();
 
-        final image = await _captureTerminalImageData(key);
+        final image = await _captureTerminalImageData(tester, key);
         final (:charWidth, :linePixels, :padding) = _measureTestMetrics();
         final rowCenterY = padding + (linePixels ~/ 2);
         final explicitBackgroundX = padding + (charWidth ~/ 2);
@@ -435,7 +435,7 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      final image = await _captureTerminalImageData(key);
+      final image = await _captureTerminalImageData(tester, key);
       final (:charWidth, :linePixels, :padding) = _measureTestMetrics();
       final cursorCenterX = padding + (3 * charWidth) + (charWidth ~/ 2);
       final cursorCenterY = padding + (linePixels ~/ 2);
@@ -479,7 +479,7 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      final image = await _captureTerminalImageData(key);
+      final image = await _captureTerminalImageData(tester, key);
       final (:charWidth, :linePixels, :padding) = _measureTestMetrics();
       final cursorCenterX = padding + (3 * charWidth) + (charWidth ~/ 2);
       final cursorCenterY = padding + (linePixels ~/ 2);
@@ -522,7 +522,7 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      final image = await _captureTerminalImageData(key);
+      final image = await _captureTerminalImageData(tester, key);
       final (:charWidth, :linePixels, :padding) = _measureTestMetrics();
       final rowCenterY = padding + (linePixels ~/ 2);
       final firstCellCenterX = padding + (charWidth ~/ 2);
@@ -591,7 +591,7 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      final image = await _captureTerminalImageData(key);
+      final image = await _captureTerminalImageData(tester, key);
       final (:charWidth, :linePixels, :padding) = _measureTestMetrics();
       final cursorX = padding + (charWidth ~/ 2);
       final cursorY = padding + linePixels - 2;
@@ -638,7 +638,7 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      final image = await _captureTerminalImageData(key);
+      final image = await _captureTerminalImageData(tester, key);
       final (:charWidth, :linePixels, :padding) = _measureTestMetrics();
       final rowCenterY = padding + (linePixels ~/ 2);
       final leadingEdgeX = padding + 1;
@@ -691,7 +691,7 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      final image = await _captureTerminalImageData(key);
+      final image = await _captureTerminalImageData(tester, key);
       expect(
         _countPixelsNearColor(image, color: widgetHyperlink, tolerance: 28),
         greaterThan(10),
@@ -734,7 +734,7 @@ void main() {
         scrollController.jumpTo(300);
         await tester.pumpAndSettle();
 
-        final image = await _captureTerminalImageData(key);
+        final image = await _captureTerminalImageData(tester, key);
         expect(
           _countPixelsNearColor(image, color: widgetCursor, tolerance: 20),
           0,
@@ -777,7 +777,7 @@ void main() {
       await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
       await tester.pumpAndSettle();
 
-      final image = await _captureTerminalImageData(key);
+      final image = await _captureTerminalImageData(tester, key);
       expect(
         _countPixelsNearColor(image, color: widgetSelection, tolerance: 32),
         greaterThan(20),
@@ -818,7 +818,7 @@ void main() {
         await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
         await tester.pumpAndSettle();
 
-        final image = await _captureTerminalImageData(key);
+        final image = await _captureTerminalImageData(tester, key);
         expect(
           _countPixelsNearColor(image, color: widgetSelection, tolerance: 32),
           greaterThan(20),
@@ -917,7 +917,7 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      final image = await _captureTerminalImageData(key);
+      final image = await _captureTerminalImageData(tester, key);
       const headerHeight = 28;
       final (:charWidth, :linePixels, :padding) = _measureTestMetrics();
       final topRowY = headerHeight + padding + (linePixels ~/ 2);
@@ -974,7 +974,7 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      final image = await _captureTerminalImageData(key);
+      final image = await _captureTerminalImageData(tester, key);
       const headerHeight = 28;
       final (:charWidth, :linePixels, :padding) = _measureTestMetrics();
       final cellCenterY = headerHeight + padding + (linePixels ~/ 2);
@@ -1015,7 +1015,7 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      final image = await _captureTerminalImageData(key);
+      final image = await _captureTerminalImageData(tester, key);
       const headerHeight = 28;
       final (:charWidth, :linePixels, :padding) = _measureTestMetrics();
 
@@ -1141,7 +1141,7 @@ void main() {
           ),
         );
         await tester.pumpAndSettle();
-        final formatterImage = await _captureTerminalImageData(formatterKey);
+        final formatterImage = await _captureTerminalImageData(tester, formatterKey);
 
         final renderStateKey = GlobalKey();
         await tester.pumpWidget(
@@ -1157,7 +1157,7 @@ void main() {
           ),
         );
         await tester.pumpAndSettle();
-        final renderStateImage = await _captureTerminalImageData(
+        final renderStateImage = await _captureTerminalImageData(tester, 
           renderStateKey,
         );
 
@@ -1239,7 +1239,7 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
-      final formatterImage = await _captureTerminalImageData(formatterKey);
+      final formatterImage = await _captureTerminalImageData(tester, formatterKey);
 
       final renderStateKey = GlobalKey();
       await tester.pumpWidget(
@@ -1255,7 +1255,7 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
-      final renderStateImage = await _captureTerminalImageData(renderStateKey);
+      final renderStateImage = await _captureTerminalImageData(tester, renderStateKey);
 
       const headerHeight = 28;
       final (:charWidth, :linePixels, :padding) = _measureTestMetrics();
@@ -1328,7 +1328,7 @@ void main() {
           ),
         );
         await tester.pumpAndSettle();
-        final formatterImage = await _captureTerminalImageData(formatterKey);
+        final formatterImage = await _captureTerminalImageData(tester, formatterKey);
 
         final renderStateKey = GlobalKey();
         await tester.pumpWidget(
@@ -1344,7 +1344,7 @@ void main() {
           ),
         );
         await tester.pumpAndSettle();
-        final renderStateImage = await _captureTerminalImageData(
+        final renderStateImage = await _captureTerminalImageData(tester, 
           renderStateKey,
         );
 
@@ -1414,7 +1414,7 @@ void main() {
           await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
           await tester.pumpAndSettle();
 
-          return _captureTerminalPaintStats(key);
+          return _captureTerminalPaintStats(tester, key);
         }
 
         final formatterStats = await captureSelectedStats(
@@ -4258,25 +4258,39 @@ String _lastNonEmptyLine(List<String> lines) {
       .trimRight();
 }
 
-Future<_TerminalPaintStats> _captureTerminalPaintStats(GlobalKey key) async {
-  final image = await _captureTerminalImageData(key);
+Future<_TerminalPaintStats> _captureTerminalPaintStats(
+  WidgetTester tester,
+  GlobalKey key,
+) async {
+  final image = await _captureTerminalImageData(tester, key);
   return _measureTerminalPaintStats(image.rgba);
 }
 
-Future<_TerminalImageData> _captureTerminalImageData(GlobalKey key) async {
+Future<_TerminalImageData> _captureTerminalImageData(
+  WidgetTester tester,
+  GlobalKey key,
+) async {
   final boundary =
       key.currentContext!.findRenderObject()! as RenderRepaintBoundary;
-  final image = await boundary.toImage(pixelRatio: 1);
-  try {
-    final byteData = await image.toByteData(format: ui.ImageByteFormat.rawRgba);
-    return _TerminalImageData(
-      width: image.width,
-      height: image.height,
-      rgba: byteData!.buffer.asUint8List(),
-    );
-  } finally {
-    image.dispose();
-  }
+  // Must run outside the fake-async zone: `toByteData` completes on real async
+  // work, and awaiting that inside the zone wedges the test after its body has
+  // already finished, which then poisons every later test in the file.
+  final data = await tester.runAsync(() async {
+    final image = await boundary.toImage(pixelRatio: 1);
+    try {
+      final byteData = await image.toByteData(
+        format: ui.ImageByteFormat.rawRgba,
+      );
+      return _TerminalImageData(
+        width: image.width,
+        height: image.height,
+        rgba: byteData!.buffer.asUint8List(),
+      );
+    } finally {
+      image.dispose();
+    }
+  });
+  return data!;
 }
 
 Future<_TerminalPaintStats> _captureModePaintStats(
@@ -4312,7 +4326,7 @@ Future<_TerminalPaintStats> _captureModePaintStats(
     ),
   );
   await tester.pumpAndSettle();
-  return _captureTerminalPaintStats(key);
+  return _captureTerminalPaintStats(tester, key);
 }
 
 _TerminalPaintStats _measureTerminalPaintStats(Uint8List rgba) {

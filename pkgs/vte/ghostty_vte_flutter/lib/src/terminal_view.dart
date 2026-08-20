@@ -3284,7 +3284,7 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
                           painter: _GhosttyTerminalPainter(
                             revision: widget.controller.revision,
                             title: widget.controller.title,
-                            snapshot: widget.controller.snapshot,
+                            snapshotOf: () => widget.controller.snapshot,
                             renderSnapshot: widget.controller.renderSnapshot,
                             renderer: widget.renderer,
                             running: widget.controller.isRunning,
@@ -3740,7 +3740,7 @@ class _GhosttyTerminalPainter extends CustomPainter {
   _GhosttyTerminalPainter({
     required this.revision,
     required this.title,
-    required this.snapshot,
+    required this.snapshotOf,
     required this.renderSnapshot,
     required this.renderer,
     required this.running,
@@ -3778,7 +3778,13 @@ class _GhosttyTerminalPainter extends CustomPainter {
 
   final int revision;
   final String title;
-  final GhosttyTerminalSnapshot snapshot;
+  /// The formatter transcript, fetched only if it is actually needed.
+  ///
+  /// Reading it runs three full-buffer formatter passes in the controller, and
+  /// the render-state path never paints from it. Holding a thunk instead of a
+  /// value keeps a native-rendered frame from paying for a transcript nothing
+  /// draws.
+  final ValueGetter<GhosttyTerminalSnapshot> snapshotOf;
   final GhosttyTerminalRenderSnapshot? renderSnapshot;
   final GhosttyTerminalRendererMode renderer;
   final bool running;
@@ -3947,6 +3953,10 @@ class _GhosttyTerminalPainter extends CustomPainter {
     // the formatter snapshot instead; skipping it leaves a bare background,
     // which on web means the terminal never renders at all.
     canvas.drawRect(contentRect, Paint()..color = backgroundColor);
+
+    // Past the render-state early return, so this is the one path that draws
+    // from the transcript and the only place worth building it.
+    final snapshot = snapshotOf();
 
     final maxVisible = math.max(1, (contentHeight / linePixels).floor());
     final maxOffset = math.max(0, snapshot.lines.length - maxVisible);
@@ -4187,8 +4197,16 @@ class _GhosttyTerminalPainter extends CustomPainter {
         selection != oldDelegate.selection ||
         renderer != oldDelegate.renderer ||
         !_renderSnapshotEquals(renderSnapshot, oldDelegate.renderSnapshot) ||
-        !listEquals(snapshot.lines, oldDelegate.snapshot.lines) ||
-        snapshot.cursor != oldDelegate.snapshot.cursor;
+        // Guarded: only the fallback paints from the transcript, and comparing
+        // it forces the formatter passes this indirection exists to avoid.
+        (renderSnapshot == null && _formatterTranscriptChanged(oldDelegate));
+  }
+
+  bool _formatterTranscriptChanged(_GhosttyTerminalPainter oldDelegate) {
+    final current = snapshotOf();
+    final previous = oldDelegate.snapshotOf();
+    return !listEquals(current.lines, previous.lines) ||
+        current.cursor != previous.cursor;
   }
 
   void _paintNativeRenderState(

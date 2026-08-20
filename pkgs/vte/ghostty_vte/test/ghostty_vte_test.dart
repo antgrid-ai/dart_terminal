@@ -533,6 +533,66 @@ void main() {
     expect(selectedCell?.graphemes, 'B');
   });
 
+  test('render state snapshot reuses rows Ghostty reports clean', () {
+    final terminal = GhosttyVt.newTerminal(cols: 8, rows: 4);
+    final renderState = terminal.createRenderState();
+    addTearDown(renderState.close);
+    addTearDown(terminal.close);
+
+    terminal.write('AB\r\nCD');
+    renderState.update();
+    final first = renderState.snapshot();
+    expect(first.rowsData.map((row) => row.dirty), everyElement(isTrue));
+
+    // The snapshot consumes both dirty layers, so a second one with nothing
+    // written in between must report clean and hand back the same cell lists.
+    renderState.update();
+    final second = renderState.snapshot();
+    expect(
+      second.dirty,
+      GhosttyRenderStateDirty.GHOSTTY_RENDER_STATE_DIRTY_FALSE,
+    );
+    expect(second.rowsData.map((row) => row.dirty), everyElement(isFalse));
+    for (var y = 0; y < second.rowsData.length; y++) {
+      expect(identical(second.rowsData[y].cells, first.rowsData[y].cells), isTrue);
+    }
+
+    // Rewriting one row must rebuild that row and leave untouched ones reused.
+    // Rows 0 and 1 both go dirty here: the cursor moving off row 1 dirties it
+    // so the renderer can erase the old cursor cell.
+    terminal.write('\x1b[1;1HZ');
+    renderState.update();
+    final third = renderState.snapshot();
+    expect(third.rowsData[0].cells[0].graphemes, 'Z');
+    expect(third.rowsData[0].dirty, isTrue);
+    for (var y = 2; y < third.rowsData.length; y++) {
+      expect(third.rowsData[y].dirty, isFalse);
+      expect(
+        identical(third.rowsData[y].cells, second.rowsData[y].cells),
+        isTrue,
+      );
+    }
+  });
+
+  test('render state reports the default style for unstyled cells', () {
+    final terminal = GhosttyVt.newTerminal(cols: 8, rows: 4);
+    final renderState = terminal.createRenderState();
+    addTearDown(renderState.close);
+    addTearDown(terminal.close);
+
+    terminal.write('A\x1b[31mB\x1b[0m');
+    renderState.update();
+    final snapshot = renderState.snapshot();
+
+    final unstyled = snapshot.rowsData.first.cells[0];
+    expect(unstyled.raw.hasStyling, isFalse);
+    expect(unstyled.style.isDefault, isTrue);
+
+    final styled = snapshot.rowsData.first.cells[1];
+    expect(styled.raw.hasStyling, isTrue);
+    expect(styled.style.foreground.isSet, isTrue);
+  });
+
   test('render state exposes live viewport and cursor getters', () {
     final terminal = GhosttyVt.newTerminal(cols: 8, rows: 4);
     final renderState = terminal.createRenderState();
