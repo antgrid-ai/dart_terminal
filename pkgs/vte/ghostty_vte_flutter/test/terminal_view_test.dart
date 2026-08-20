@@ -1,6 +1,7 @@
 import 'dart:ui' as ui;
 import 'dart:io';
 
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
@@ -3347,6 +3348,110 @@ void main() {
         expect(currentSelection, isNull);
       },
     );
+
+    testWidgets('release names the button that was pressed, not "none"', (
+      tester,
+    ) async {
+      if (!hasNativeTerminal) {
+        return;
+      }
+
+      final controller = _RecordingTerminalController();
+      addTearDown(controller.dispose);
+      controller.terminal.setMode(VtModes.normalMouse, true);
+      controller.terminal.setMode(VtModes.sgrMouse, true);
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: SizedBox(
+              width: 600,
+              height: 400,
+              child: GhosttyTerminalView(
+                controller: controller,
+                autofocus: true,
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final gesture = await tester.createGesture(
+        kind: ui.PointerDeviceKind.mouse,
+        buttons: kSecondaryMouseButton,
+      );
+      await gesture.down(const Offset(100, 100));
+      await tester.pump();
+      await gesture.up();
+      await tester.pump(const Duration(milliseconds: 300));
+
+      final buttons = controller.mouseEvents
+          .where(
+            (event) =>
+                event.action == GhosttyMouseAction.GHOSTTY_MOUSE_ACTION_PRESS ||
+                event.action == GhosttyMouseAction.GHOSTTY_MOUSE_ACTION_RELEASE,
+          )
+          .map((event) => event.button)
+          .toList();
+
+      expect(buttons, <GhosttyMouseButton?>[
+        GhosttyMouseButton.GHOSTTY_MOUSE_BUTTON_RIGHT,
+        GhosttyMouseButton.GHOSTTY_MOUSE_BUTTON_RIGHT,
+      ]);
+    });
+
+    testWidgets('SGR release encodes the pressed button, not button 3', (
+      tester,
+    ) async {
+      if (!hasNativeTerminal) {
+        return;
+      }
+
+      final controller = GhosttyTerminalController();
+      addTearDown(controller.dispose);
+      final written = <int>[];
+      controller.attachExternalTransport(
+        writeBytes: (bytes) {
+          written.addAll(bytes);
+          return true;
+        },
+      );
+      controller.terminal.setMode(VtModes.normalMouse, true);
+      controller.terminal.setMode(VtModes.sgrMouse, true);
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: SizedBox(
+              width: 600,
+              height: 400,
+              child: GhosttyTerminalView(
+                controller: controller,
+                autofocus: true,
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final gesture = await _startMouseGesture(tester, const Offset(100, 100));
+      await tester.pump();
+      await gesture.up();
+      await tester.pump(const Duration(milliseconds: 300));
+
+      final encoded = String.fromCharCodes(written);
+      final press = RegExp(r'\x1b\[<(\d+);(\d+);(\d+)M').firstMatch(encoded);
+      final release = RegExp(r'\x1b\[<(\d+);(\d+);(\d+)m').firstMatch(encoded);
+      expect(press, isNotNull, reason: 'no SGR press in $written');
+      expect(release, isNotNull, reason: 'no SGR release in $written');
+      // Button 3 is SGR's "something was released, no idea what" — a TUI
+      // matching a click on button 0 never sees the press complete.
+      expect(release!.group(1), '0');
+      expect(release.group(2), press!.group(2));
+      expect(release.group(3), press.group(3));
+    });
 
     testWidgets(
       'scroll wheel forwards Ghostty mouse buttons four and five when reporting is enabled',

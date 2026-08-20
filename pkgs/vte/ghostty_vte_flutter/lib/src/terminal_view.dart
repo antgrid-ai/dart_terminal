@@ -530,6 +530,22 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
   ContextMenuController? _selectionContextMenuController;
   int _pendingSerialTapCount = 0;
   PointerDeviceKind _lastPointerKind = PointerDeviceKind.mouse;
+
+  /// The button each pointer went down with, so its release can name it.
+  ///
+  /// `PointerUpEvent.buttons` is already 0 by the time the release arrives, so
+  /// the event itself no longer says what came up — and "no button" is not a
+  /// cosmetic loss: the encoder reads it as button 3 ("something was
+  /// released"), which SGR-mode TUIs do not match against a button-0 press,
+  /// and button-event tracking (`?1002`) drops the report entirely. Either
+  /// way the program sees a click that never completes.
+  ///
+  /// Only implicitly-resolved buttons are latched — a synthetic wheel step
+  /// names its button outright and must not evict the entry for a button the
+  /// same pointer is physically holding.
+  final Map<int, GhosttyMouseButton> _pointerPressedButtons =
+      <int, GhosttyMouseButton>{};
+
   bool _touchSelectionActive = false;
   bool _touchSelectionHandlesVisible = false;
 
@@ -1879,6 +1895,33 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
     return null;
   }
 
+  /// [_mouseButtonForEvent], plus the press/release latch that keeps a release
+  /// attributable. Split out so [_mouseButtonForEvent] stays a pure read of the
+  /// event.
+  GhosttyMouseButton? _resolveMouseButton(
+    GhosttyMouseAction action,
+    PointerEvent event,
+    GhosttyMouseButton? explicitButton,
+  ) {
+    if (explicitButton != null) {
+      return explicitButton;
+    }
+    final resolved = _mouseButtonForEvent(action, event, null);
+    if (action == GhosttyMouseAction.GHOSTTY_MOUSE_ACTION_PRESS) {
+      if (resolved != null) {
+        _pointerPressedButtons[event.pointer] = resolved;
+      }
+      return resolved;
+    }
+    if (action == GhosttyMouseAction.GHOSTTY_MOUSE_ACTION_RELEASE) {
+      // Drop the entry even when the event answered on its own — a press whose
+      // release never consults the latch is otherwise one leaked entry.
+      final pressed = _pointerPressedButtons.remove(event.pointer);
+      return resolved ?? pressed;
+    }
+    return resolved;
+  }
+
   bool _eventHasPressedButton(GhosttyMouseAction action, PointerEvent event) {
     return event.buttons != 0 ||
         action == GhosttyMouseAction.GHOSTTY_MOUSE_ACTION_PRESS;
@@ -1977,6 +2020,10 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
     GhosttyMouseButton? button,
     Offset? positionOverride,
   }) {
+    // Resolved ahead of the capture guard so the latch stays balanced across a
+    // mode change mid-gesture: a pointer pressed while reporting was on can be
+    // released after it went off, and that release still has to clear its entry.
+    final resolvedButton = _resolveMouseButton(action, event, button);
     if (!_terminalMouseReportingCapturesPointerKind(event.kind)) {
       return;
     }
@@ -1992,7 +2039,7 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
     );
     widget.controller.sendMouse(
       action: action,
-      button: _mouseButtonForEvent(action, event, button),
+      button: resolvedButton,
       mods: GhosttyTerminalModifierState.fromHardwareKeyboard().ghosttyMask,
       position: VtMousePosition(x: localPosition.dx, y: terminalLocalY),
       size: _mouseEncoderSize(size, metrics),
