@@ -248,7 +248,10 @@ void main() {
           ),
         );
         await tester.pumpAndSettle();
-        final formatterStats = await _captureTerminalPaintStats(tester, formatterKey);
+        final formatterStats = await _captureTerminalPaintStats(
+          tester,
+          formatterKey,
+        );
 
         final renderStateKey = GlobalKey();
         await tester.pumpWidget(
@@ -262,7 +265,8 @@ void main() {
           ),
         );
         await tester.pumpAndSettle();
-        final renderStateStats = await _captureTerminalPaintStats(tester, 
+        final renderStateStats = await _captureTerminalPaintStats(
+          tester,
           renderStateKey,
         );
 
@@ -1141,7 +1145,10 @@ void main() {
           ),
         );
         await tester.pumpAndSettle();
-        final formatterImage = await _captureTerminalImageData(tester, formatterKey);
+        final formatterImage = await _captureTerminalImageData(
+          tester,
+          formatterKey,
+        );
 
         final renderStateKey = GlobalKey();
         await tester.pumpWidget(
@@ -1157,7 +1164,8 @@ void main() {
           ),
         );
         await tester.pumpAndSettle();
-        final renderStateImage = await _captureTerminalImageData(tester, 
+        final renderStateImage = await _captureTerminalImageData(
+          tester,
           renderStateKey,
         );
 
@@ -1239,7 +1247,10 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
-      final formatterImage = await _captureTerminalImageData(tester, formatterKey);
+      final formatterImage = await _captureTerminalImageData(
+        tester,
+        formatterKey,
+      );
 
       final renderStateKey = GlobalKey();
       await tester.pumpWidget(
@@ -1255,7 +1266,10 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
-      final renderStateImage = await _captureTerminalImageData(tester, renderStateKey);
+      final renderStateImage = await _captureTerminalImageData(
+        tester,
+        renderStateKey,
+      );
 
       const headerHeight = 28;
       final (:charWidth, :linePixels, :padding) = _measureTestMetrics();
@@ -1328,7 +1342,10 @@ void main() {
           ),
         );
         await tester.pumpAndSettle();
-        final formatterImage = await _captureTerminalImageData(tester, formatterKey);
+        final formatterImage = await _captureTerminalImageData(
+          tester,
+          formatterKey,
+        );
 
         final renderStateKey = GlobalKey();
         await tester.pumpWidget(
@@ -1344,7 +1361,8 @@ void main() {
           ),
         );
         await tester.pumpAndSettle();
-        final renderStateImage = await _captureTerminalImageData(tester, 
+        final renderStateImage = await _captureTerminalImageData(
+          tester,
           renderStateKey,
         );
 

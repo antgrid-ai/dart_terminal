@@ -3778,6 +3778,7 @@ class _GhosttyTerminalPainter extends CustomPainter {
 
   final int revision;
   final String title;
+
   /// The formatter transcript, fetched only if it is actually needed.
   ///
   /// Reading it runs three full-buffer formatter passes in the controller, and
@@ -3785,6 +3786,18 @@ class _GhosttyTerminalPainter extends CustomPainter {
   /// value keeps a native-rendered frame from paying for a transcript nothing
   /// draws.
   final ValueGetter<GhosttyTerminalSnapshot> snapshotOf;
+
+  /// The transcript this painter drew from, resolved at most once.
+  ///
+  /// The thunk closes over the *live* controller, so calling it again later
+  /// answers with the current transcript, not the one this painter was built
+  /// against. Latching the first read is what lets [shouldRepaint] compare a
+  /// previous painter's transcript against the current one instead of
+  /// comparing the current one against itself.
+  GhosttyTerminalSnapshot? _resolvedSnapshot;
+
+  GhosttyTerminalSnapshot get _snapshot => _resolvedSnapshot ??= snapshotOf();
+
   final GhosttyTerminalRenderSnapshot? renderSnapshot;
   final GhosttyTerminalRendererMode renderer;
   final bool running;
@@ -3956,7 +3969,7 @@ class _GhosttyTerminalPainter extends CustomPainter {
 
     // Past the render-state early return, so this is the one path that draws
     // from the transcript and the only place worth building it.
-    final snapshot = snapshotOf();
+    final snapshot = _snapshot;
 
     final maxVisible = math.max(1, (contentHeight / linePixels).floor());
     final maxOffset = math.max(0, snapshot.lines.length - maxVisible);
@@ -4199,12 +4212,29 @@ class _GhosttyTerminalPainter extends CustomPainter {
         !_renderSnapshotEquals(renderSnapshot, oldDelegate.renderSnapshot) ||
         // Guarded: only the fallback paints from the transcript, and comparing
         // it forces the formatter passes this indirection exists to avoid.
-        (renderSnapshot == null && _formatterTranscriptChanged(oldDelegate));
+        (_paintsTranscript && _formatterTranscriptChanged(oldDelegate));
+  }
+
+  /// Whether [paint] will fall back to drawing the formatter transcript.
+  ///
+  /// Mirrors the branch in [paint]: the render-state path returns before the
+  /// transcript is touched, and every other path draws from it. Testing only
+  /// `renderSnapshot == null` would miss the formatter renderer mode and an
+  /// engine snapshot with no viewport data, both of which paint the transcript.
+  bool get _paintsTranscript {
+    final native = renderSnapshot;
+    return renderer != GhosttyTerminalRendererMode.renderState ||
+        native == null ||
+        !native.hasViewportData;
   }
 
   bool _formatterTranscriptChanged(_GhosttyTerminalPainter oldDelegate) {
-    final current = snapshotOf();
-    final previous = oldDelegate.snapshotOf();
+    // `oldDelegate._snapshot` is the transcript that painter actually drew;
+    // reading `oldDelegate.snapshotOf()` instead would re-enter the live
+    // controller and compare the current transcript with itself, which can
+    // never report a change.
+    final current = _snapshot;
+    final previous = oldDelegate._snapshot;
     return !listEquals(current.lines, previous.lines) ||
         current.cursor != previous.cursor;
   }

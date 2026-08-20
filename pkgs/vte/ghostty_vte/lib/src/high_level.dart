@@ -3689,17 +3689,26 @@ final class VtRenderState {
 
     final rowsData = <VtRenderRowSnapshot>[];
     var index = 0;
-    visitRows((row) {
-      final rowDirty = row.dirty;
-      final reuse = reusable && index < cached.length && !rowDirty;
-      if (reuse) {
-        rowsData.add(_asClean(cached[index]));
-      } else {
-        rowsData.add(_snapshotRowFrom(row, dirty: rowDirty));
-        row.dirty = false;
-      }
-      index++;
-    });
+    try {
+      visitRows((row) {
+        final rowDirty = row.dirty;
+        final reuse = reusable && index < cached.length && !rowDirty;
+        if (reuse) {
+          rowsData.add(_asClean(cached[index]));
+        } else {
+          rowsData.add(_snapshotRowFrom(row, dirty: rowDirty));
+          row.dirty = false;
+        }
+        index++;
+      });
+    } catch (_) {
+      // A throw partway through leaves the row dirty bits half-consumed: the
+      // rows already walked were cleared but never made it into a new cache.
+      // Reusing the old cache against those cleared bits would serve stale
+      // rows forever, so drop it and force the next snapshot to walk all rows.
+      invalidateSnapshotCache();
+      rethrow;
+    }
 
     dirty = bindings.GhosttyRenderStateDirty.GHOSTTY_RENDER_STATE_DIRTY_FALSE;
     _cachedRows = rowsData;

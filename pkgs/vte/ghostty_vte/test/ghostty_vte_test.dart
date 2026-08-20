@@ -554,7 +554,10 @@ void main() {
     );
     expect(second.rowsData.map((row) => row.dirty), everyElement(isFalse));
     for (var y = 0; y < second.rowsData.length; y++) {
-      expect(identical(second.rowsData[y].cells, first.rowsData[y].cells), isTrue);
+      expect(
+        identical(second.rowsData[y].cells, first.rowsData[y].cells),
+        isTrue,
+      );
     }
 
     // Rewriting one row must rebuild that row and leave untouched ones reused.

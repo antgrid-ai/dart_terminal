@@ -936,7 +936,12 @@ class GhosttyTerminalController extends ChangeNotifier
       // Mid-frame: the guest will emit ESU when the repaint is complete. Skip
       // the rebuild AND the notify — notifying would pull a listener straight
       // back into the snapshot getters and undo the deferral.
+      //
+      // Both layers are marked stale: the bytes are already in the engine, so
+      // a caller that reads `plainText`/`lines`/`snapshot` before ESU must see
+      // them rather than the transcript from before this frame started.
       _snapshotStale = true;
+      _formattedStale = true;
       _flushFocusReport();
       return;
     }
@@ -1087,6 +1092,7 @@ class GhosttyTerminalController extends ChangeNotifier
     final renderState = _renderState;
     if (renderState == null) {
       _renderSnapshot = null;
+      _snapshotStale = false;
       return;
     }
     // Row reuse inside `snapshot()` is keyed on viewport position. A scroll
@@ -1094,6 +1100,9 @@ class GhosttyTerminalController extends ChangeNotifier
     // with no dirty bit to signal it.
     renderState.invalidateSnapshotCache();
     _refreshRenderNow();
+    // The render snapshot is now current, so a getter must not walk the
+    // viewport a second time for output that this rebuild already picked up.
+    _snapshotStale = false;
   }
 
   /// Computes the set of zero-based row indices (within [wrappedLines]) that
