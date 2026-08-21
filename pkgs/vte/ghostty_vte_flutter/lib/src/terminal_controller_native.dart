@@ -81,6 +81,18 @@ class GhosttyTerminalController extends ChangeNotifier
   void Function(int cols, int rows, int cellWidthPx, int cellHeightPx)?
   _externalResize;
 
+  /// Whether VT replies generated *while parsing guest output* (DSR, DECRPM,
+  /// OSC colour reports, DA/XTVERSION when a host answer is supplied) reach the
+  /// transport. See [attachExternalTransport].
+  bool _forwardGuestQueryReplies = true;
+
+  /// True only for the duration of a [VtTerminal.writeBytes] call on guest
+  /// output. Every reply the engine emits inside that window is an answer to a
+  /// query the guest just asked; every reply emitted outside it originates from
+  /// user action (mouse, focus, keys). That distinction is the whole basis for
+  /// [_forwardGuestQueryReplies], so the two must stay together.
+  bool _ingestingGuestBytes = false;
+
   VtTerminal? _terminal;
   VtTerminalFormatter? _plainFormatter;
   VtTerminalFormatter? _styledFormatter;
@@ -567,15 +579,30 @@ class GhosttyTerminalController extends ChangeNotifier
   }
 
   /// Attach an external transport backend such as an SSH session.
+  ///
+  /// Set [forwardGuestQueryReplies] false when something else on the far side
+  /// of the transport already answers the guest's capability queries. A host
+  /// that fronts the PTY — answering so a TUI still boots with no viewer
+  /// attached — is the second responder to every DSR/DECRQM the guest sends,
+  /// and the guest sees two answers to one question, one of them a transport
+  /// round-trip late. A late duplicate is not merely redundant: terminal query
+  /// protocols are FIFO, so one arriving mid-round can be matched against the
+  /// wrong pending query.
+  ///
+  /// Replies that originate from user action (mouse reports, focus events, key
+  /// encoding) are always forwarded — they are produced outside guest-output
+  /// parsing, which is what this discriminates on.
   void attachExternalTransport({
     required bool Function(List<int> bytes) writeBytes,
     void Function(int cols, int rows, int cellWidthPx, int cellHeightPx)?
     onResize,
     GhosttyTerminalShellLaunch? launch,
+    bool forwardGuestQueryReplies = true,
   }) {
     _ensureTerminal();
     _externalWriteBytes = writeBytes;
     _externalResize = onResize;
+    _forwardGuestQueryReplies = forwardGuestQueryReplies;
     if (launch != null) {
       _activeShellLaunch = _freezeLaunch(launch);
     }
@@ -587,6 +614,7 @@ class GhosttyTerminalController extends ChangeNotifier
   void detachExternalTransport() {
     _externalWriteBytes = null;
     _externalResize = null;
+    _forwardGuestQueryReplies = true;
   }
 
   /// Inject remote output bytes directly into the VT stream.
@@ -920,6 +948,11 @@ class GhosttyTerminalController extends ChangeNotifier
   ///
   /// The [data] buffer is only valid for the duration of this call.
   void _onTerminalWritePty(Uint8List data) {
+    if (_ingestingGuestBytes && !_forwardGuestQueryReplies) {
+      // Dropped, not observed: `onWritePtyData` documents itself as firing
+      // after the data has been forwarded, and this reply never was.
+      return;
+    }
     final session = _ptySession;
     if (session != null) {
       session.writeBytes(Uint8List.fromList(data));
@@ -937,11 +970,21 @@ class GhosttyTerminalController extends ChangeNotifier
 
   void _ingestBytes(List<int> bytes) {
     if (bytes.isEmpty) {
+      // Still flush: a focus report the transport rejected is retried here and
+      // nowhere else, so returning outright stranded it until the next byte of
+      // guest output — which for a focused, idle session may never come.
+      _flushFocusReport();
       return;
     }
 
     final terminal = _ensureTerminal();
-    terminal.writeBytes(bytes);
+    final wasIngesting = _ingestingGuestBytes;
+    _ingestingGuestBytes = true;
+    try {
+      terminal.writeBytes(bytes);
+    } finally {
+      _ingestingGuestBytes = wasIngesting;
+    }
     // Keep the viewport pinned to the live tail while following the bottom, so
     // new output stays visible. When the user has scrolled up into scrollback
     // (_viewportFollowingBottom == false) the viewport is left where it is.

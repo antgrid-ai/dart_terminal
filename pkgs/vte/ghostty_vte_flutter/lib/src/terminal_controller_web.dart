@@ -252,11 +252,16 @@ class GhosttyTerminalController extends ChangeNotifier
   }
 
   /// Attach an external transport backend such as an SSH session.
+  ///
+  /// [forwardGuestQueryReplies] is accepted for parity with the native
+  /// controller and ignored: this stub has no VT engine, so it generates no
+  /// replies to suppress.
   void attachExternalTransport({
     required bool Function(List<int> bytes) writeBytes,
     void Function(int cols, int rows, int cellWidthPx, int cellHeightPx)?
     onResize,
     GhosttyTerminalShellLaunch? launch,
+    bool forwardGuestQueryReplies = true,
   }) {
     _ensureTerminal();
     _externalWriteBytes = writeBytes;

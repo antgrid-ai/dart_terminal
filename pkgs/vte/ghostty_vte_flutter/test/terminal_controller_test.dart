@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/widgets.dart';
@@ -7,6 +8,59 @@ import 'package:ghostty_vte_flutter/ghostty_vte_flutter.dart';
 import 'support/native_terminal.dart';
 
 void main() {
+
+  test('external transport forwards guest query replies by default', () {
+    if (!hasNativeTerminal) {
+      return;
+    }
+
+    final controller = GhosttyTerminalController();
+    addTearDown(controller.dispose);
+
+    final sent = <int>[];
+    controller.attachExternalTransport(
+      writeBytes: (bytes) {
+        sent.addAll(bytes);
+        return true;
+      },
+    );
+
+    // DA1 — the engine answers this one itself, with no handler installed.
+    controller.appendOutputBytes(utf8.encode('\x1b[c'));
+
+    expect(utf8.decode(sent), startsWith('\x1b[?'));
+  });
+
+  test('forwardGuestQueryReplies:false drops replies to guest queries', () {
+    if (!hasNativeTerminal) {
+      return;
+    }
+
+    final controller = GhosttyTerminalController();
+    addTearDown(controller.dispose);
+
+    final sent = <int>[];
+    controller.attachExternalTransport(
+      writeBytes: (bytes) {
+        sent.addAll(bytes);
+        return true;
+      },
+      forwardGuestQueryReplies: false,
+    );
+
+    // DA1, DA2, XTVERSION, DSR, DECRQM and the kitty flags query all produce a
+    // reply from the engine; none may reach a transport whose far side already
+    // answered them.
+    controller.appendOutputBytes(
+      utf8.encode('\x1b[c\x1b[>c\x1b[>0q\x1b[6n\x1b[?2026\$p\x1b[?u'),
+    );
+
+    expect(sent, isEmpty);
+
+    // User input is not a reply to anything the guest asked, so it still goes.
+    controller.writeBytes(utf8.encode('ls\r'));
+    expect(utf8.decode(sent), 'ls\r');
+  });
   test('controller parses OSC title and CRLF-delimited line buffer', () {
     if (!hasNativeTerminal) {
       return;
