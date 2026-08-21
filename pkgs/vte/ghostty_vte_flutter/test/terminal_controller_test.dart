@@ -8,7 +8,6 @@ import 'package:ghostty_vte_flutter/ghostty_vte_flutter.dart';
 import 'support/native_terminal.dart';
 
 void main() {
-
   test('external transport forwards guest query replies by default', () {
     if (!hasNativeTerminal) {
       return;
