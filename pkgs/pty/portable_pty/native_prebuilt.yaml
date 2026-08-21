@@ -13,13 +13,13 @@ link_mode: dynamic_library
 # though the checkout in hand is fixed.
 source:
   type: git
-  repository: https://github.com/bharathm03/dart_terminal
+  repository: https://github.com/antgrid-ai/dart_terminal
   revision: 6faee7d360e5acf917d59faeaaf37573de88d71f
   subdirectory: pkgs/pty/portable_pty
 
 release:
   provider: github
-  repository: bharathm03/dart_terminal
+  repository: antgrid-ai/dart_terminal
   # `+antgrid.N`, never `-antgrid.N`. The release job derives the prerelease flag
   # by grepping the version for a dash, so a dash-suffixed tag is silently
   # classed a prerelease — which skips the lockfile and asset-hash jobs and

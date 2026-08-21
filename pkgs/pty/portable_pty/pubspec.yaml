@@ -12,9 +12,9 @@ description: >-
 # suffix; see native_prebuilt.yaml for why it must not use a dash either.
 version: 0.0.6+antgrid.2
 
-repository: https://github.com/bharathm03/dart_terminal/tree/master/pkgs/pty/portable_pty
-homepage: https://github.com/bharathm03/dart_terminal
-issue_tracker: https://github.com/bharathm03/dart_terminal/issues
+repository: https://github.com/antgrid-ai/dart_terminal/tree/master/pkgs/pty/portable_pty
+homepage: https://github.com/antgrid-ai/dart_terminal
+issue_tracker: https://github.com/antgrid-ai/dart_terminal/issues
 
 topics:
   - terminal

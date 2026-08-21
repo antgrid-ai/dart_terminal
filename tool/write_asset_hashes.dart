@@ -31,7 +31,7 @@ import '../pkgs/vte/ghostty_vte/lib/src/hook/dynamic_library.dart';
 /// while VTE's artifacts are still upstream's and are fetched from there. Keep
 /// this in step with each package's `native_prebuilt.yaml` `release.repository`.
 String _repoFor(String packagePrefix) => switch (packagePrefix) {
-  'pty' => 'bharathm03/dart_terminal',
+  'pty' => 'antgrid-ai/dart_terminal',
   'vte' => 'kingwill101/dart_terminal',
   _ => throw ArgumentError.value(packagePrefix, 'packagePrefix'),
 };
