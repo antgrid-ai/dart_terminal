@@ -8,22 +8,39 @@
 # per `sh -c` invocation: multi-line constructs are a syntax error there, and
 # even `cd` does not persist from one line to the next.
 #
-# Background. A run failed with the whole test file "failing to load", seconds
-# after install and before a single test body had run:
+# Background. Runs fail with the whole test file "failing to load", seconds
+# after install and before a single test body has run. Three messages have been
+# seen for what is one fault:
 #
 #     getVersion: (-32000) Service connection disposed
 #     getVersion: (112) Service has disappeared
+#     Failed to start Dart Development Service
 #
-# DDS raises 112 in exactly one place - client.dart forwards a request to the
-# VM service peer, the peer is already closed, and the resulting StateError
-# becomes kServiceDisappeared. So the app process on the device died; the tool
-# did not time out. (integration_test_device.dart does wrap the connect in a
-# 5s timeout, but that path throws TimeoutException, and it did not.)
+# All three mean the VM service connection died mid-handshake, differing only
+# in how far DDS had got. dds.dart documents failedToStart as "the connection
+# to the remote VM service terminates unexpectedly during Dart Development
+# Service startup", and raises 112 from one place - client.dart forwards a
+# request to a peer that is already closed and turns the StateError into
+# kServiceDisappeared. None of them is a timeout: that path exists (a 5s wrap
+# in integration_test_device.dart) but throws TimeoutException, which we have
+# never seen.
+#
+# What dies is the adb socket, not the app. A captured failure shows the app
+# rendering normally right up to the end -
+#
+#     4263 I Choreographer: Skipped 31 frames!
+#     4263 D FlutterJNI: Sending viewport metrics to the engine.
+#      436 I adbd: host-18: already offline
+#      436 W adbd: timeout expired while flushing socket, closing
+#
+# - with no crash, no tombstone, and no kill. The VM service is reached over an
+# adb forward, so a dropped transport looks exactly like a dead app from the
+# tool's side.
 #
 # flutter_tools only starts streaming device logs AFTER that connection
-# succeeds, so an app that dies inside this window has its logcat discarded and
+# succeeds, so a genuine crash inside this window has its logcat discarded and
 # the cause becomes unrecoverable. Capturing it here is the point: a crash on
-# device must fail the job, while a lost handshake may be retried.
+# device must fail the job, while a lost transport may be repaired and retried.
 
 set -u
 
@@ -47,8 +64,11 @@ readonly MAX_ATTEMPTS=2
 # many to be worth it here.
 readonly CRASH_RE='>>> com\.example\.example <<<|Process: com\.example\.example|Killing [0-9]+:com\.example\.example|lowmemorykiller.*example\.example|Fatal signal.*example\.example|#[0-9]+ pc .*(libghostty|libportable_pty)'
 
-# The signature of the handshake dropping before any test ran.
-readonly HANDSHAKE_RE='Service has disappeared|Service connection disposed'
+# The signature of the handshake dropping before any test ran. Kept as an
+# explicit list rather than "the file failed to load" so that a Dart
+# compile error - which also fails to load, but deterministically - is still
+# reported as the test failure it is instead of costing a retry.
+readonly HANDSHAKE_RE='Service has disappeared|Service connection disposed|Failed to start Dart Development Service'
 
 cd "$EXAMPLE_DIR" || exit 2
 
@@ -99,6 +119,15 @@ while true; do
     echo "Lost the VM service handshake ${attempt} times in a row."
     exit 1
   fi
+
+  # Reset transports the server has already marked offline - the exact state
+  # adbd reports when this fires. Cheaper and less disruptive than restarting
+  # the adb server, which the emulator action is also talking to.
+  echo "Resetting the adb transport before retrying; the socket, not the app, is what broke."
+  adb reconnect offline || true
+  adb wait-for-device || true
+  adb devices -l || true
+
   attempt=$((attempt + 1))
   echo "Lost the VM service handshake with a clean device log; retrying (${attempt}/${MAX_ATTEMPTS})."
 done
