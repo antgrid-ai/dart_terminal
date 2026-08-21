@@ -530,6 +530,22 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
   ContextMenuController? _selectionContextMenuController;
   int _pendingSerialTapCount = 0;
   PointerDeviceKind _lastPointerKind = PointerDeviceKind.mouse;
+
+  /// The button each pointer went down with, so its release can name it.
+  ///
+  /// `PointerUpEvent.buttons` is already 0 by the time the release arrives, so
+  /// the event itself no longer says what came up — and "no button" is not a
+  /// cosmetic loss: the encoder reads it as button 3 ("something was
+  /// released"), which SGR-mode TUIs do not match against a button-0 press,
+  /// and button-event tracking (`?1002`) drops the report entirely. Either
+  /// way the program sees a click that never completes.
+  ///
+  /// Only implicitly-resolved buttons are latched — a synthetic wheel step
+  /// names its button outright and must not evict the entry for a button the
+  /// same pointer is physically holding.
+  final Map<int, GhosttyMouseButton> _pointerPressedButtons =
+      <int, GhosttyMouseButton>{};
+
   bool _touchSelectionActive = false;
   bool _touchSelectionHandlesVisible = false;
 
@@ -1879,6 +1895,33 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
     return null;
   }
 
+  /// [_mouseButtonForEvent], plus the press/release latch that keeps a release
+  /// attributable. Split out so [_mouseButtonForEvent] stays a pure read of the
+  /// event.
+  GhosttyMouseButton? _resolveMouseButton(
+    GhosttyMouseAction action,
+    PointerEvent event,
+    GhosttyMouseButton? explicitButton,
+  ) {
+    if (explicitButton != null) {
+      return explicitButton;
+    }
+    final resolved = _mouseButtonForEvent(action, event, null);
+    if (action == GhosttyMouseAction.GHOSTTY_MOUSE_ACTION_PRESS) {
+      if (resolved != null) {
+        _pointerPressedButtons[event.pointer] = resolved;
+      }
+      return resolved;
+    }
+    if (action == GhosttyMouseAction.GHOSTTY_MOUSE_ACTION_RELEASE) {
+      // Drop the entry even when the event answered on its own — a press whose
+      // release never consults the latch is otherwise one leaked entry.
+      final pressed = _pointerPressedButtons.remove(event.pointer);
+      return resolved ?? pressed;
+    }
+    return resolved;
+  }
+
   bool _eventHasPressedButton(GhosttyMouseAction action, PointerEvent event) {
     return event.buttons != 0 ||
         action == GhosttyMouseAction.GHOSTTY_MOUSE_ACTION_PRESS;
@@ -1977,6 +2020,10 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
     GhosttyMouseButton? button,
     Offset? positionOverride,
   }) {
+    // Resolved ahead of the capture guard so the latch stays balanced across a
+    // mode change mid-gesture: a pointer pressed while reporting was on can be
+    // released after it went off, and that release still has to clear its entry.
+    final resolvedButton = _resolveMouseButton(action, event, button);
     if (!_terminalMouseReportingCapturesPointerKind(event.kind)) {
       return;
     }
@@ -1992,7 +2039,7 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
     );
     widget.controller.sendMouse(
       action: action,
-      button: _mouseButtonForEvent(action, event, button),
+      button: resolvedButton,
       mods: GhosttyTerminalModifierState.fromHardwareKeyboard().ghosttyMask,
       position: VtMousePosition(x: localPosition.dx, y: terminalLocalY),
       size: _mouseEncoderSize(size, metrics),
@@ -3284,7 +3331,7 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
                           painter: _GhosttyTerminalPainter(
                             revision: widget.controller.revision,
                             title: widget.controller.title,
-                            snapshot: widget.controller.snapshot,
+                            snapshotOf: () => widget.controller.snapshot,
                             renderSnapshot: widget.controller.renderSnapshot,
                             renderer: widget.renderer,
                             running: widget.controller.isRunning,
@@ -3740,7 +3787,7 @@ class _GhosttyTerminalPainter extends CustomPainter {
   _GhosttyTerminalPainter({
     required this.revision,
     required this.title,
-    required this.snapshot,
+    required this.snapshotOf,
     required this.renderSnapshot,
     required this.renderer,
     required this.running,
@@ -3778,7 +3825,26 @@ class _GhosttyTerminalPainter extends CustomPainter {
 
   final int revision;
   final String title;
-  final GhosttyTerminalSnapshot snapshot;
+
+  /// The formatter transcript, fetched only if it is actually needed.
+  ///
+  /// Reading it runs three full-buffer formatter passes in the controller, and
+  /// the render-state path never paints from it. Holding a thunk instead of a
+  /// value keeps a native-rendered frame from paying for a transcript nothing
+  /// draws.
+  final ValueGetter<GhosttyTerminalSnapshot> snapshotOf;
+
+  /// The transcript this painter drew from, resolved at most once.
+  ///
+  /// The thunk closes over the *live* controller, so calling it again later
+  /// answers with the current transcript, not the one this painter was built
+  /// against. Latching the first read is what lets [shouldRepaint] compare a
+  /// previous painter's transcript against the current one instead of
+  /// comparing the current one against itself.
+  GhosttyTerminalSnapshot? _resolvedSnapshot;
+
+  GhosttyTerminalSnapshot get _snapshot => _resolvedSnapshot ??= snapshotOf();
+
   final GhosttyTerminalRenderSnapshot? renderSnapshot;
   final GhosttyTerminalRendererMode renderer;
   final bool running;
@@ -3947,6 +4013,10 @@ class _GhosttyTerminalPainter extends CustomPainter {
     // the formatter snapshot instead; skipping it leaves a bare background,
     // which on web means the terminal never renders at all.
     canvas.drawRect(contentRect, Paint()..color = backgroundColor);
+
+    // Past the render-state early return, so this is the one path that draws
+    // from the transcript and the only place worth building it.
+    final snapshot = _snapshot;
 
     final maxVisible = math.max(1, (contentHeight / linePixels).floor());
     final maxOffset = math.max(0, snapshot.lines.length - maxVisible);
@@ -4187,8 +4257,33 @@ class _GhosttyTerminalPainter extends CustomPainter {
         selection != oldDelegate.selection ||
         renderer != oldDelegate.renderer ||
         !_renderSnapshotEquals(renderSnapshot, oldDelegate.renderSnapshot) ||
-        !listEquals(snapshot.lines, oldDelegate.snapshot.lines) ||
-        snapshot.cursor != oldDelegate.snapshot.cursor;
+        // Guarded: only the fallback paints from the transcript, and comparing
+        // it forces the formatter passes this indirection exists to avoid.
+        (_paintsTranscript && _formatterTranscriptChanged(oldDelegate));
+  }
+
+  /// Whether [paint] will fall back to drawing the formatter transcript.
+  ///
+  /// Mirrors the branch in [paint]: the render-state path returns before the
+  /// transcript is touched, and every other path draws from it. Testing only
+  /// `renderSnapshot == null` would miss the formatter renderer mode and an
+  /// engine snapshot with no viewport data, both of which paint the transcript.
+  bool get _paintsTranscript {
+    final native = renderSnapshot;
+    return renderer != GhosttyTerminalRendererMode.renderState ||
+        native == null ||
+        !native.hasViewportData;
+  }
+
+  bool _formatterTranscriptChanged(_GhosttyTerminalPainter oldDelegate) {
+    // `oldDelegate._snapshot` is the transcript that painter actually drew;
+    // reading `oldDelegate.snapshotOf()` instead would re-enter the live
+    // controller and compare the current transcript with itself, which can
+    // never report a change.
+    final current = _snapshot;
+    final previous = oldDelegate._snapshot;
+    return !listEquals(current.lines, previous.lines) ||
+        current.cursor != previous.cursor;
   }
 
   void _paintNativeRenderState(

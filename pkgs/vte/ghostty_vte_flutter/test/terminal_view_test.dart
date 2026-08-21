@@ -1,6 +1,7 @@
 import 'dart:ui' as ui;
 import 'dart:io';
 
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
@@ -248,7 +249,10 @@ void main() {
           ),
         );
         await tester.pumpAndSettle();
-        final formatterStats = await _captureTerminalPaintStats(formatterKey);
+        final formatterStats = await _captureTerminalPaintStats(
+          tester,
+          formatterKey,
+        );
 
         final renderStateKey = GlobalKey();
         await tester.pumpWidget(
@@ -263,6 +267,7 @@ void main() {
         );
         await tester.pumpAndSettle();
         final renderStateStats = await _captureTerminalPaintStats(
+          tester,
           renderStateKey,
         );
 
@@ -312,7 +317,7 @@ void main() {
         );
         await tester.pumpAndSettle();
 
-        final image = await _captureTerminalImageData(key);
+        final image = await _captureTerminalImageData(tester, key);
 
         expect(
           _pixelMatchesColor(
@@ -378,7 +383,7 @@ void main() {
         );
         await tester.pumpAndSettle();
 
-        final image = await _captureTerminalImageData(key);
+        final image = await _captureTerminalImageData(tester, key);
         final (:charWidth, :linePixels, :padding) = _measureTestMetrics();
         final rowCenterY = padding + (linePixels ~/ 2);
         final explicitBackgroundX = padding + (charWidth ~/ 2);
@@ -435,7 +440,7 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      final image = await _captureTerminalImageData(key);
+      final image = await _captureTerminalImageData(tester, key);
       final (:charWidth, :linePixels, :padding) = _measureTestMetrics();
       final cursorCenterX = padding + (3 * charWidth) + (charWidth ~/ 2);
       final cursorCenterY = padding + (linePixels ~/ 2);
@@ -479,7 +484,7 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      final image = await _captureTerminalImageData(key);
+      final image = await _captureTerminalImageData(tester, key);
       final (:charWidth, :linePixels, :padding) = _measureTestMetrics();
       final cursorCenterX = padding + (3 * charWidth) + (charWidth ~/ 2);
       final cursorCenterY = padding + (linePixels ~/ 2);
@@ -522,7 +527,7 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      final image = await _captureTerminalImageData(key);
+      final image = await _captureTerminalImageData(tester, key);
       final (:charWidth, :linePixels, :padding) = _measureTestMetrics();
       final rowCenterY = padding + (linePixels ~/ 2);
       final firstCellCenterX = padding + (charWidth ~/ 2);
@@ -591,7 +596,7 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      final image = await _captureTerminalImageData(key);
+      final image = await _captureTerminalImageData(tester, key);
       final (:charWidth, :linePixels, :padding) = _measureTestMetrics();
       final cursorX = padding + (charWidth ~/ 2);
       final cursorY = padding + linePixels - 2;
@@ -638,7 +643,7 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      final image = await _captureTerminalImageData(key);
+      final image = await _captureTerminalImageData(tester, key);
       final (:charWidth, :linePixels, :padding) = _measureTestMetrics();
       final rowCenterY = padding + (linePixels ~/ 2);
       final leadingEdgeX = padding + 1;
@@ -691,7 +696,7 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      final image = await _captureTerminalImageData(key);
+      final image = await _captureTerminalImageData(tester, key);
       expect(
         _countPixelsNearColor(image, color: widgetHyperlink, tolerance: 28),
         greaterThan(10),
@@ -734,7 +739,7 @@ void main() {
         scrollController.jumpTo(300);
         await tester.pumpAndSettle();
 
-        final image = await _captureTerminalImageData(key);
+        final image = await _captureTerminalImageData(tester, key);
         expect(
           _countPixelsNearColor(image, color: widgetCursor, tolerance: 20),
           0,
@@ -777,7 +782,7 @@ void main() {
       await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
       await tester.pumpAndSettle();
 
-      final image = await _captureTerminalImageData(key);
+      final image = await _captureTerminalImageData(tester, key);
       expect(
         _countPixelsNearColor(image, color: widgetSelection, tolerance: 32),
         greaterThan(20),
@@ -818,7 +823,7 @@ void main() {
         await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
         await tester.pumpAndSettle();
 
-        final image = await _captureTerminalImageData(key);
+        final image = await _captureTerminalImageData(tester, key);
         expect(
           _countPixelsNearColor(image, color: widgetSelection, tolerance: 32),
           greaterThan(20),
@@ -917,7 +922,7 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      final image = await _captureTerminalImageData(key);
+      final image = await _captureTerminalImageData(tester, key);
       const headerHeight = 28;
       final (:charWidth, :linePixels, :padding) = _measureTestMetrics();
       final topRowY = headerHeight + padding + (linePixels ~/ 2);
@@ -974,7 +979,7 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      final image = await _captureTerminalImageData(key);
+      final image = await _captureTerminalImageData(tester, key);
       const headerHeight = 28;
       final (:charWidth, :linePixels, :padding) = _measureTestMetrics();
       final cellCenterY = headerHeight + padding + (linePixels ~/ 2);
@@ -1015,7 +1020,7 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      final image = await _captureTerminalImageData(key);
+      final image = await _captureTerminalImageData(tester, key);
       const headerHeight = 28;
       final (:charWidth, :linePixels, :padding) = _measureTestMetrics();
 
@@ -1141,7 +1146,10 @@ void main() {
           ),
         );
         await tester.pumpAndSettle();
-        final formatterImage = await _captureTerminalImageData(formatterKey);
+        final formatterImage = await _captureTerminalImageData(
+          tester,
+          formatterKey,
+        );
 
         final renderStateKey = GlobalKey();
         await tester.pumpWidget(
@@ -1158,6 +1166,7 @@ void main() {
         );
         await tester.pumpAndSettle();
         final renderStateImage = await _captureTerminalImageData(
+          tester,
           renderStateKey,
         );
 
@@ -1239,7 +1248,10 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
-      final formatterImage = await _captureTerminalImageData(formatterKey);
+      final formatterImage = await _captureTerminalImageData(
+        tester,
+        formatterKey,
+      );
 
       final renderStateKey = GlobalKey();
       await tester.pumpWidget(
@@ -1255,7 +1267,10 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
-      final renderStateImage = await _captureTerminalImageData(renderStateKey);
+      final renderStateImage = await _captureTerminalImageData(
+        tester,
+        renderStateKey,
+      );
 
       const headerHeight = 28;
       final (:charWidth, :linePixels, :padding) = _measureTestMetrics();
@@ -1328,7 +1343,10 @@ void main() {
           ),
         );
         await tester.pumpAndSettle();
-        final formatterImage = await _captureTerminalImageData(formatterKey);
+        final formatterImage = await _captureTerminalImageData(
+          tester,
+          formatterKey,
+        );
 
         final renderStateKey = GlobalKey();
         await tester.pumpWidget(
@@ -1345,6 +1363,7 @@ void main() {
         );
         await tester.pumpAndSettle();
         final renderStateImage = await _captureTerminalImageData(
+          tester,
           renderStateKey,
         );
 
@@ -1414,7 +1433,7 @@ void main() {
           await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
           await tester.pumpAndSettle();
 
-          return _captureTerminalPaintStats(key);
+          return _captureTerminalPaintStats(tester, key);
         }
 
         final formatterStats = await captureSelectedStats(
@@ -3330,6 +3349,110 @@ void main() {
       },
     );
 
+    testWidgets('release names the button that was pressed, not "none"', (
+      tester,
+    ) async {
+      if (!hasNativeTerminal) {
+        return;
+      }
+
+      final controller = _RecordingTerminalController();
+      addTearDown(controller.dispose);
+      controller.terminal.setMode(VtModes.normalMouse, true);
+      controller.terminal.setMode(VtModes.sgrMouse, true);
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: SizedBox(
+              width: 600,
+              height: 400,
+              child: GhosttyTerminalView(
+                controller: controller,
+                autofocus: true,
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final gesture = await tester.createGesture(
+        kind: ui.PointerDeviceKind.mouse,
+        buttons: kSecondaryMouseButton,
+      );
+      await gesture.down(const Offset(100, 100));
+      await tester.pump();
+      await gesture.up();
+      await tester.pump(const Duration(milliseconds: 300));
+
+      final buttons = controller.mouseEvents
+          .where(
+            (event) =>
+                event.action == GhosttyMouseAction.GHOSTTY_MOUSE_ACTION_PRESS ||
+                event.action == GhosttyMouseAction.GHOSTTY_MOUSE_ACTION_RELEASE,
+          )
+          .map((event) => event.button)
+          .toList();
+
+      expect(buttons, <GhosttyMouseButton?>[
+        GhosttyMouseButton.GHOSTTY_MOUSE_BUTTON_RIGHT,
+        GhosttyMouseButton.GHOSTTY_MOUSE_BUTTON_RIGHT,
+      ]);
+    });
+
+    testWidgets('SGR release encodes the pressed button, not button 3', (
+      tester,
+    ) async {
+      if (!hasNativeTerminal) {
+        return;
+      }
+
+      final controller = GhosttyTerminalController();
+      addTearDown(controller.dispose);
+      final written = <int>[];
+      controller.attachExternalTransport(
+        writeBytes: (bytes) {
+          written.addAll(bytes);
+          return true;
+        },
+      );
+      controller.terminal.setMode(VtModes.normalMouse, true);
+      controller.terminal.setMode(VtModes.sgrMouse, true);
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: SizedBox(
+              width: 600,
+              height: 400,
+              child: GhosttyTerminalView(
+                controller: controller,
+                autofocus: true,
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final gesture = await _startMouseGesture(tester, const Offset(100, 100));
+      await tester.pump();
+      await gesture.up();
+      await tester.pump(const Duration(milliseconds: 300));
+
+      final encoded = String.fromCharCodes(written);
+      final press = RegExp(r'\x1b\[<(\d+);(\d+);(\d+)M').firstMatch(encoded);
+      final release = RegExp(r'\x1b\[<(\d+);(\d+);(\d+)m').firstMatch(encoded);
+      expect(press, isNotNull, reason: 'no SGR press in $written');
+      expect(release, isNotNull, reason: 'no SGR release in $written');
+      // Button 3 is SGR's "something was released, no idea what" — a TUI
+      // matching a click on button 0 never sees the press complete.
+      expect(release!.group(1), '0');
+      expect(release.group(2), press!.group(2));
+      expect(release.group(3), press.group(3));
+    });
+
     testWidgets(
       'scroll wheel forwards Ghostty mouse buttons four and five when reporting is enabled',
       (tester) async {
@@ -4258,25 +4381,39 @@ String _lastNonEmptyLine(List<String> lines) {
       .trimRight();
 }
 
-Future<_TerminalPaintStats> _captureTerminalPaintStats(GlobalKey key) async {
-  final image = await _captureTerminalImageData(key);
+Future<_TerminalPaintStats> _captureTerminalPaintStats(
+  WidgetTester tester,
+  GlobalKey key,
+) async {
+  final image = await _captureTerminalImageData(tester, key);
   return _measureTerminalPaintStats(image.rgba);
 }
 
-Future<_TerminalImageData> _captureTerminalImageData(GlobalKey key) async {
+Future<_TerminalImageData> _captureTerminalImageData(
+  WidgetTester tester,
+  GlobalKey key,
+) async {
   final boundary =
       key.currentContext!.findRenderObject()! as RenderRepaintBoundary;
-  final image = await boundary.toImage(pixelRatio: 1);
-  try {
-    final byteData = await image.toByteData(format: ui.ImageByteFormat.rawRgba);
-    return _TerminalImageData(
-      width: image.width,
-      height: image.height,
-      rgba: byteData!.buffer.asUint8List(),
-    );
-  } finally {
-    image.dispose();
-  }
+  // Must run outside the fake-async zone: `toByteData` completes on real async
+  // work, and awaiting that inside the zone wedges the test after its body has
+  // already finished, which then poisons every later test in the file.
+  final data = await tester.runAsync(() async {
+    final image = await boundary.toImage(pixelRatio: 1);
+    try {
+      final byteData = await image.toByteData(
+        format: ui.ImageByteFormat.rawRgba,
+      );
+      return _TerminalImageData(
+        width: image.width,
+        height: image.height,
+        rgba: byteData!.buffer.asUint8List(),
+      );
+    } finally {
+      image.dispose();
+    }
+  });
+  return data!;
 }
 
 Future<_TerminalPaintStats> _captureModePaintStats(
@@ -4312,7 +4449,7 @@ Future<_TerminalPaintStats> _captureModePaintStats(
     ),
   );
   await tester.pumpAndSettle();
-  return _captureTerminalPaintStats(key);
+  return _captureTerminalPaintStats(tester, key);
 }
 
 _TerminalPaintStats _measureTerminalPaintStats(Uint8List rgba) {

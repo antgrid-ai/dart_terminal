@@ -177,7 +177,13 @@ final class GhosttyVt {
     required int cols,
     required int rows,
     int maxScrollback = 10_000,
-  }) => VtTerminal(cols: cols, rows: rows, maxScrollback: maxScrollback);
+    int? maxScrollbackLines,
+  }) => VtTerminal(
+    cols: cols,
+    rows: rows,
+    maxScrollback: maxScrollback,
+    maxScrollbackLines: maxScrollbackLines,
+  );
 
   /// Creates a mouse event object.
   static VtMouseEvent newMouseEvent() => VtMouseEvent();
@@ -1059,6 +1065,87 @@ final class VtRowSnapshot {
 }
 
 /// Snapshot of a raw terminal cell.
+/// Reusable out-pointers for the cell getters in this file.
+///
+/// Every `ghostty_cell_get` and render-cursor fetch writes through a
+/// caller-provided pointer, so the straightforward spelling allocates and frees
+/// one per field per cell - around a dozen malloc/free pairs per cell, tens of
+/// thousands per viewport walk, for values that never outlive the call that
+/// reads them. One set per cursor is safe because each value is read before the
+/// next field is fetched.
+final class _CellScratch {
+  _CellScratch()
+    : u8 = calloc<ffi.Uint8>(),
+      u16 = calloc<ffi.Uint16>(),
+      u32 = calloc<ffi.Uint32>(),
+      b = calloc<ffi.Bool>(),
+      rgb = calloc<bindings.GhosttyColorRgb>(),
+      raw = calloc<bindings.GhosttyCell>(),
+      style = calloc<bindings.GhosttyStyle>(),
+      graphemeLen = calloc<ffi.Uint32>();
+
+  final ffi.Pointer<ffi.Uint8> u8;
+  final ffi.Pointer<ffi.Uint16> u16;
+  final ffi.Pointer<ffi.Uint32> u32;
+  final ffi.Pointer<ffi.Bool> b;
+  final ffi.Pointer<bindings.GhosttyColorRgb> rgb;
+  final ffi.Pointer<bindings.GhosttyCell> raw;
+  final ffi.Pointer<bindings.GhosttyStyle> style;
+  final ffi.Pointer<ffi.Uint32> graphemeLen;
+
+  ffi.Pointer<ffi.Uint32> _graphemeBuf = ffi.nullptr;
+  int _graphemeCap = 0;
+
+  /// A codepoint buffer of at least [len], grown in place and reused.
+  ffi.Pointer<ffi.Uint32> graphemeBuffer(int len) {
+    if (len > _graphemeCap) {
+      if (_graphemeCap != 0) {
+        calloc.free(_graphemeBuf);
+      }
+      _graphemeBuf = calloc<ffi.Uint32>(len);
+      _graphemeCap = len;
+    }
+    return _graphemeBuf;
+  }
+
+  void free() {
+    if (_graphemeCap != 0) {
+      calloc.free(_graphemeBuf);
+      _graphemeBuf = ffi.nullptr;
+      _graphemeCap = 0;
+    }
+    calloc.free(graphemeLen);
+    calloc.free(style);
+    calloc.free(raw);
+    calloc.free(rgb);
+    calloc.free(b);
+    calloc.free(u32);
+    calloc.free(u16);
+    calloc.free(u8);
+  }
+}
+
+/// The style of a cell Ghostty reports as unstyled.
+///
+/// `GHOSTTY_CELL_DATA_HAS_STYLING` false means no explicit style was ever set,
+/// which is the zeroed `GhosttyStyle`: every colour tag `NONE`, every flag
+/// false, underline `NONE`. Most cells on a terminal screen are unstyled, and
+/// fetching an invariant value costs an FFI crossing each time.
+const _unstyledStyle = VtStyle(
+  foreground: VtStyleColor.none(),
+  background: VtStyleColor.none(),
+  underlineColor: VtStyleColor.none(),
+  bold: false,
+  italic: false,
+  faint: false,
+  blink: false,
+  inverse: false,
+  invisible: false,
+  strikethrough: false,
+  overline: false,
+  underline: bindings.GhosttySgrUnderline.GHOSTTY_SGR_UNDERLINE_NONE,
+);
+
 final class VtCellSnapshot {
   const VtCellSnapshot({
     required this.codepoint,
@@ -1131,30 +1218,38 @@ final class VtCellSnapshot {
       bindings.GhosttyCellSemanticContent.GHOSTTY_CELL_SEMANTIC_OUTPUT;
 
   factory VtCellSnapshot.fromRaw(bindings.DartGhosttyCell cell) {
+    final scratch = _CellScratch();
+    try {
+      return VtCellSnapshot._unpack(cell, scratch);
+    } finally {
+      scratch.free();
+    }
+  }
+
+  /// Unpacks [cell] through caller-owned [scratch].
+  ///
+  /// A `GhosttyCell` is an opaque uint64 and every field is a separate
+  /// `ghostty_cell_get`, so this is the hot path of any viewport walk. A caller
+  /// unpacking more than one cell must reuse a single [_CellScratch] rather
+  /// than paying an allocation per field.
+  factory VtCellSnapshot._unpack(
+    bindings.DartGhosttyCell cell,
+    _CellScratch scratch,
+  ) {
     int getUint32(bindings.GhosttyCellData data) {
-      final out = calloc<ffi.Uint32>();
-      try {
-        _checkResult(
-          bindings.ghostty_cell_get(cell, data, out.cast()),
-          'cell_get',
-        );
-        return out.value;
-      } finally {
-        calloc.free(out);
-      }
+      _checkResult(
+        bindings.ghostty_cell_get(cell, data, scratch.u32.cast()),
+        'cell_get',
+      );
+      return scratch.u32.value;
     }
 
     bool getBool(bindings.GhosttyCellData data) {
-      final out = calloc<ffi.Bool>();
-      try {
-        _checkResult(
-          bindings.ghostty_cell_get(cell, data, out.cast()),
-          'cell_get',
-        );
-        return out.value;
-      } finally {
-        calloc.free(out);
-      }
+      _checkResult(
+        bindings.ghostty_cell_get(cell, data, scratch.b.cast()),
+        'cell_get',
+      );
+      return scratch.b.value;
     }
 
     final contentTag = bindings.GhosttyCellContentTag.fromValue(
@@ -1164,40 +1259,30 @@ final class VtCellSnapshot {
         contentTag ==
             bindings.GhosttyCellContentTag.GHOSTTY_CELL_CONTENT_BG_COLOR_PALETTE
         ? (() {
-            final out = calloc<ffi.Uint8>();
-            try {
-              _checkResult(
-                bindings.ghostty_cell_get(
-                  cell,
-                  bindings.GhosttyCellData.GHOSTTY_CELL_DATA_COLOR_PALETTE,
-                  out.cast(),
-                ),
-                'cell_get',
-              );
-              return out.value;
-            } finally {
-              calloc.free(out);
-            }
+            _checkResult(
+              bindings.ghostty_cell_get(
+                cell,
+                bindings.GhosttyCellData.GHOSTTY_CELL_DATA_COLOR_PALETTE,
+                scratch.u8.cast(),
+              ),
+              'cell_get',
+            );
+            return scratch.u8.value;
           })()
         : null;
     final colorRgb =
         contentTag ==
             bindings.GhosttyCellContentTag.GHOSTTY_CELL_CONTENT_BG_COLOR_RGB
         ? (() {
-            final out = calloc<bindings.GhosttyColorRgb>();
-            try {
-              _checkResult(
-                bindings.ghostty_cell_get(
-                  cell,
-                  bindings.GhosttyCellData.GHOSTTY_CELL_DATA_COLOR_RGB,
-                  out.cast(),
-                ),
-                'cell_get',
-              );
-              return _rgbFromNative(out.ref);
-            } finally {
-              calloc.free(out);
-            }
+            _checkResult(
+              bindings.ghostty_cell_get(
+                cell,
+                bindings.GhosttyCellData.GHOSTTY_CELL_DATA_COLOR_RGB,
+                scratch.rgb.cast(),
+              ),
+              'cell_get',
+            );
+            return _rgbFromNative(scratch.rgb.ref);
           })()
         : null;
 
@@ -1214,20 +1299,15 @@ final class VtCellSnapshot {
         bindings.GhosttyCellData.GHOSTTY_CELL_DATA_HAS_STYLING,
       ),
       styleId: (() {
-        final out = calloc<ffi.Uint16>();
-        try {
-          _checkResult(
-            bindings.ghostty_cell_get(
-              cell,
-              bindings.GhosttyCellData.GHOSTTY_CELL_DATA_STYLE_ID,
-              out.cast(),
-            ),
-            'cell_get',
-          );
-          return out.value;
-        } finally {
-          calloc.free(out);
-        }
+        _checkResult(
+          bindings.ghostty_cell_get(
+            cell,
+            bindings.GhosttyCellData.GHOSTTY_CELL_DATA_STYLE_ID,
+            scratch.u16.cast(),
+          ),
+          'cell_get',
+        );
+        return scratch.u16.value;
       })(),
       hasHyperlink: getBool(
         bindings.GhosttyCellData.GHOSTTY_CELL_DATA_HAS_HYPERLINK,
@@ -1571,7 +1651,14 @@ final class VtRenderRowCellsCursor {
   VtRenderRowCellsCursor._(this._handle);
 
   final bindings.GhosttyRenderStateRowCells _handle;
+
+  // Allocated on the first cell read. A row walk opens one cursor per row and
+  // a cursor may be opened only to be closed again, so eight malloc/free pairs
+  // must not be the price of admission.
+  _CellScratch? _scratchOrNull;
   bool _closed = false;
+
+  _CellScratch get _scratch => _scratchOrNull ??= _CellScratch();
 
   void _ensureOpen() {
     if (_closed) {
@@ -1602,74 +1689,70 @@ final class VtRenderRowCellsCursor {
   /// The cell at this cursor's current position.
   VtRenderCellSnapshot get current {
     _ensureOpen();
-    final raw = calloc<bindings.GhosttyCell>();
-    final style = calloc<bindings.GhosttyStyle>();
-    final graphemeLen = calloc<ffi.Uint32>();
-    try {
-      style.ref.size = ffi.sizeOf<bindings.GhosttyStyle>();
-      _checkResult(
-        bindings.ghostty_render_state_row_cells_get(
-          _handle,
-          bindings
-              .GhosttyRenderStateRowCellsData
-              .GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_RAW,
-          raw.cast(),
-        ),
-        'ghostty_render_state_row_cells_get',
-      );
+    final scratch = _scratch;
+    _checkResult(
+      bindings.ghostty_render_state_row_cells_get(
+        _handle,
+        bindings
+            .GhosttyRenderStateRowCellsData
+            .GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_RAW,
+        scratch.raw.cast(),
+      ),
+      'ghostty_render_state_row_cells_get',
+    );
+    final raw = VtCellSnapshot._unpack(scratch.raw.value, scratch);
+
+    // `hasStyling` is already unpacked above, so skipping the fetch for a cell
+    // with no explicit style costs nothing to decide and removes an FFI
+    // crossing for the majority of a screen.
+    final VtStyle style;
+    if (raw.hasStyling) {
+      scratch.style.ref.size = ffi.sizeOf<bindings.GhosttyStyle>();
       _checkResult(
         bindings.ghostty_render_state_row_cells_get(
           _handle,
           bindings
               .GhosttyRenderStateRowCellsData
               .GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_STYLE,
-          style.cast(),
+          scratch.style.cast(),
         ),
         'ghostty_render_state_row_cells_get',
       );
+      style = VtStyle.fromNative(scratch.style.ref);
+    } else {
+      style = _unstyledStyle;
+    }
+
+    _checkResult(
+      bindings.ghostty_render_state_row_cells_get(
+        _handle,
+        bindings
+            .GhosttyRenderStateRowCellsData
+            .GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_GRAPHEMES_LEN,
+        scratch.graphemeLen.cast(),
+      ),
+      'ghostty_render_state_row_cells_get',
+    );
+    final graphemeLen = scratch.graphemeLen.value;
+    final String graphemes;
+    if (graphemeLen == 0) {
+      graphemes = '';
+    } else {
+      final buffer = scratch.graphemeBuffer(graphemeLen);
       _checkResult(
         bindings.ghostty_render_state_row_cells_get(
           _handle,
           bindings
               .GhosttyRenderStateRowCellsData
-              .GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_GRAPHEMES_LEN,
-          graphemeLen.cast(),
+              .GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_GRAPHEMES_BUF,
+          buffer.cast(),
         ),
         'ghostty_render_state_row_cells_get',
       );
-      final graphemes = graphemeLen.value == 0
-          ? ''
-          : (() {
-              final buffer = calloc<ffi.Uint32>(graphemeLen.value);
-              try {
-                _checkResult(
-                  bindings.ghostty_render_state_row_cells_get(
-                    _handle,
-                    bindings
-                        .GhosttyRenderStateRowCellsData
-                        .GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_GRAPHEMES_BUF,
-                    buffer.cast(),
-                  ),
-                  'ghostty_render_state_row_cells_get',
-                );
-                return String.fromCharCodes(
-                  buffer.asTypedList(graphemeLen.value),
-                );
-              } finally {
-                calloc.free(buffer);
-              }
-            })();
-
-      return VtRenderCellSnapshot(
-        raw: VtCellSnapshot.fromRaw(raw.value),
-        style: VtStyle.fromNative(style.ref),
-        graphemes: graphemes,
-      );
-    } finally {
-      calloc.free(graphemeLen);
-      calloc.free(style);
-      calloc.free(raw);
+      graphemes = String.fromCharCodes(buffer.asTypedList(graphemeLen));
     }
+
+    return VtRenderCellSnapshot(raw: raw, style: style, graphemes: graphemes);
   }
 
   /// Returns the cell at zero-based column [x].
@@ -1683,6 +1766,8 @@ final class VtRenderRowCellsCursor {
       return;
     }
     bindings.ghostty_render_state_row_cells_free(_handle);
+    _scratchOrNull?.free();
+    _scratchOrNull = null;
     _closed = true;
   }
 }
@@ -2085,15 +2170,23 @@ final class VtFormatterTerminalOptions {
 
 /// Stateful VT terminal emulator instance.
 final class VtTerminal {
-  VtTerminal({required int cols, required int rows, int maxScrollback = 10_000})
-    : _cols = _checkPositiveUint16(cols, 'cols'),
-      _rows = _checkPositiveUint16(rows, 'rows'),
-      _maxScrollback = _checkNonNegative(maxScrollback, 'maxScrollback'),
-      _handle = _newTerminal(
-        cols: cols,
-        rows: rows,
-        maxScrollback: maxScrollback,
-      );
+  VtTerminal({
+    required int cols,
+    required int rows,
+    int maxScrollback = 10_000,
+    int? maxScrollbackLines,
+  }) : _cols = _checkPositiveUint16(cols, 'cols'),
+       _rows = _checkPositiveUint16(rows, 'rows'),
+       _maxScrollback = _checkNonNegative(maxScrollback, 'maxScrollback'),
+       _maxScrollbackLines = maxScrollbackLines == null
+           ? null
+           : _checkNonNegative(maxScrollbackLines, 'maxScrollbackLines'),
+       _handle = _newTerminal(
+         cols: cols,
+         rows: rows,
+         maxScrollback: maxScrollback,
+         maxScrollbackLines: maxScrollbackLines,
+       );
 
   final bindings.GhosttyTerminal _handle;
   final Set<VtTerminalFormatter> _formatters = <VtTerminalFormatter>{};
@@ -2101,6 +2194,7 @@ final class VtTerminal {
   int _cols;
   int _rows;
   final int _maxScrollback;
+  final int? _maxScrollbackLines;
 
   // --- Terminal effect callbacks ---
 
@@ -2558,6 +2652,7 @@ final class VtTerminal {
     required int cols,
     required int rows,
     required int maxScrollback,
+    required int? maxScrollbackLines,
   }) {
     final out = calloc<bindings.GhosttyTerminal>();
     try {
@@ -2572,6 +2667,9 @@ final class VtTerminal {
       final terminal = out.value;
       try {
         _setScrollbackMaxBytes(terminal, maxScrollback);
+        if (maxScrollbackLines != null) {
+          _setScrollbackMaxLines(terminal, maxScrollbackLines);
+        }
       } catch (_) {
         bindings.ghostty_terminal_free(terminal);
         rethrow;
@@ -2608,6 +2706,35 @@ final class VtTerminal {
     }
   }
 
+  /// Applies a scrollback budget expressed in physical rows.
+  ///
+  /// Page-granular: the engine permits at least one standard page of rows and
+  /// only drops whole historical pages, so the retained count is an upper
+  /// bound approached from above. The byte limit still applies independently —
+  /// whichever binds first wins, so a caller that wants a line budget honoured
+  /// must leave enough bytes to hold it.
+  static void _setScrollbackMaxLines(
+    bindings.GhosttyTerminal terminal,
+    int maxScrollbackLines,
+  ) {
+    final value = calloc<ffi.Size>();
+    try {
+      value.value = maxScrollbackLines;
+      _checkResult(
+        bindings.ghostty_terminal_set(
+          terminal,
+          bindings
+              .GhosttyTerminalOption
+              .GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_LINES,
+          value.cast(),
+        ),
+        'ghostty_terminal_set(scrollback_max_lines)',
+      );
+    } finally {
+      calloc.free(value);
+    }
+  }
+
   void _ensureOpen() {
     if (_closed) {
       throw StateError('VtTerminal is already closed.');
@@ -2631,6 +2758,12 @@ final class VtTerminal {
   int get maxScrollback {
     _ensureOpen();
     return _maxScrollback;
+  }
+
+  /// The scrollback row budget, or null when only the byte budget applies.
+  int? get maxScrollbackLines {
+    _ensureOpen();
+    return _maxScrollbackLines;
   }
 
   /// The current cursor position within the active screen.
@@ -3276,6 +3409,15 @@ final class VtRenderState {
   final bindings.GhosttyRenderState _handle;
   bool _closed = false;
 
+  /// Rows materialized by the previous [snapshot], reused for rows Ghostty
+  /// reports clean. Marshalling a cell costs three FFI calls plus three
+  /// allocations, so a full-viewport walk is ~1.5us/cell — at a 200x50 grid
+  /// that is ~15ms, which a per-PTY-chunk caller cannot afford to repeat when
+  /// a typical agent repaint touches a third of the rows.
+  List<VtRenderRowSnapshot>? _cachedRows;
+  int? _cachedCols;
+  int? _cachedRowCount;
+
   static bindings.GhosttyRenderState _newRenderState() {
     final out = calloc<bindings.GhosttyRenderState>();
     try {
@@ -3541,181 +3683,123 @@ final class VtRenderState {
     }
   }
 
+  /// Materializes the current viewport.
+  ///
+  /// Consumes dirty state: rows Ghostty reports clean reuse the objects from
+  /// the previous call, and both dirty layers are reset before returning (the
+  /// `render.h` contract puts that reset on the caller, and this IS the
+  /// caller). A snapshot taken with no intervening [update] is therefore
+  /// nearly free rather than a second full walk.
   VtRenderSnapshot snapshot() {
     _ensureOpen();
+    final currentDirty = dirty;
     return VtRenderSnapshot(
       cols: cols,
       rows: rows,
-      dirty: dirty,
+      dirty: currentDirty,
       colors: colors,
       cursor: cursorSnapshot,
-      rowsData: _snapshotRows(),
+      rowsData: _snapshotRowsIncremental(currentDirty),
     );
   }
 
-  List<VtRenderRowSnapshot> _snapshotRows() {
-    final iterator = calloc<bindings.GhosttyRenderStateRowIterator>();
+  /// Drops the reuse cache, forcing the next [snapshot] to walk every row.
+  ///
+  /// Row reuse is keyed on viewport position, so anything that remaps position
+  /// to content without going through the dirty bits must invalidate here.
+  void invalidateSnapshotCache() {
+    _cachedRows = null;
+    _cachedCols = null;
+    _cachedRowCount = null;
+  }
+
+  List<VtRenderRowSnapshot> _snapshotRowsIncremental(
+    bindings.GhosttyRenderStateDirty currentDirty,
+  ) {
+    final cached = _cachedRows;
+    // A resize remaps every viewport position, so cached rows are meaningless.
+    //
+    // FULL is refused outright rather than deferred to the row bits: `render.h`
+    // keeps the two dirty layers independent ("setting one dirty state doesn't
+    // unset the other") and defines FULL as "redraw everything". Ghostty
+    // happens to also set every row bit on its full-redraw path today, so
+    // trusting the row bits would work — until a release invalidates globally
+    // without touching them, at which point the viewport silently keeps
+    // painting the previous frame.
+    final reusable =
+        cached != null &&
+        _cachedCols == cols &&
+        _cachedRowCount == rows &&
+        currentDirty !=
+            bindings.GhosttyRenderStateDirty.GHOSTTY_RENDER_STATE_DIRTY_FULL;
+
+    if (reusable &&
+        currentDirty ==
+            bindings.GhosttyRenderStateDirty.GHOSTTY_RENDER_STATE_DIRTY_FALSE) {
+      final settled = _withCleanDirty(cached);
+      _cachedRows = settled;
+      return settled;
+    }
+
+    final rowsData = <VtRenderRowSnapshot>[];
+    var index = 0;
     try {
-      _checkResult(
-        bindings.ghostty_render_state_row_iterator_new(ffi.nullptr, iterator),
-        'ghostty_render_state_row_iterator_new',
-      );
-      final iteratorHandle = iterator.value;
-      _checkResult(
-        bindings.ghostty_render_state_get(
-          _handle,
-          bindings
-              .GhosttyRenderStateData
-              .GHOSTTY_RENDER_STATE_DATA_ROW_ITERATOR,
-          iterator.cast(),
-        ),
-        'ghostty_render_state_get',
-      );
-      final rows = <VtRenderRowSnapshot>[];
-      while (bindings.ghostty_render_state_row_iterator_next(iteratorHandle)) {
-        rows.add(_snapshotRow(iteratorHandle));
-      }
+      visitRows((row) {
+        final rowDirty = row.dirty;
+        final reuse = reusable && index < cached.length && !rowDirty;
+        if (reuse) {
+          rowsData.add(_asClean(cached[index]));
+        } else {
+          rowsData.add(_snapshotRowFrom(row, dirty: rowDirty));
+          row.dirty = false;
+        }
+        index++;
+      });
+    } catch (_) {
+      // A throw partway through leaves the row dirty bits half-consumed: the
+      // rows already walked were cleared but never made it into a new cache.
+      // Reusing the old cache against those cleared bits would serve stale
+      // rows forever, so drop it and force the next snapshot to walk all rows.
+      invalidateSnapshotCache();
+      rethrow;
+    }
+
+    dirty = bindings.GhosttyRenderStateDirty.GHOSTTY_RENDER_STATE_DIRTY_FALSE;
+    _cachedRows = rowsData;
+    _cachedCols = cols;
+    _cachedRowCount = rows;
+    return rowsData;
+  }
+
+  /// [rows] with every `dirty` flag cleared, or [rows] itself when all already
+  /// are.
+  ///
+  /// `dirty` describes what changed since the last snapshot, so replaying a
+  /// previous call's flags would report a row as changed twice.
+  static List<VtRenderRowSnapshot> _withCleanDirty(
+    List<VtRenderRowSnapshot> rows,
+  ) {
+    if (!rows.any((row) => row.dirty)) {
       return rows;
-    } finally {
-      final iteratorHandle = iterator.value;
-      if (iteratorHandle != ffi.nullptr) {
-        bindings.ghostty_render_state_row_iterator_free(iteratorHandle);
-      }
-      calloc.free(iterator);
     }
+    return rows.map(_asClean).toList();
   }
 
-  VtRenderRowSnapshot _snapshotRow(
-    bindings.GhosttyRenderStateRowIterator iterator,
-  ) {
-    final dirty = calloc<ffi.Bool>();
-    final raw = calloc<bindings.GhosttyRow>();
-    final cells = calloc<bindings.GhosttyRenderStateRowCells>();
-    try {
-      _checkResult(
-        bindings.ghostty_render_state_row_get(
-          iterator,
-          bindings
-              .GhosttyRenderStateRowData
-              .GHOSTTY_RENDER_STATE_ROW_DATA_DIRTY,
-          dirty.cast(),
-        ),
-        'ghostty_render_state_row_get',
-      );
-      _checkResult(
-        bindings.ghostty_render_state_row_get(
-          iterator,
-          bindings.GhosttyRenderStateRowData.GHOSTTY_RENDER_STATE_ROW_DATA_RAW,
-          raw.cast(),
-        ),
-        'ghostty_render_state_row_get',
-      );
-      _checkResult(
-        bindings.ghostty_render_state_row_cells_new(ffi.nullptr, cells),
-        'ghostty_render_state_row_cells_new',
-      );
-      final cellsHandle = cells.value;
-      _checkResult(
-        bindings.ghostty_render_state_row_get(
-          iterator,
-          bindings
-              .GhosttyRenderStateRowData
-              .GHOSTTY_RENDER_STATE_ROW_DATA_CELLS,
-          cells.cast(),
-        ),
-        'ghostty_render_state_row_get',
-      );
-      final rowCells = <VtRenderCellSnapshot>[];
-      while (bindings.ghostty_render_state_row_cells_next(cellsHandle)) {
-        rowCells.add(_snapshotCell(cellsHandle));
-      }
-      return VtRenderRowSnapshot(
-        dirty: dirty.value,
-        raw: VtRowSnapshot.fromRaw(raw.value),
-        cells: rowCells,
-      );
-    } finally {
-      final cellsHandle = cells.value;
-      if (cellsHandle != ffi.nullptr) {
-        bindings.ghostty_render_state_row_cells_free(cellsHandle);
-      }
-      calloc.free(cells);
-      calloc.free(raw);
-      calloc.free(dirty);
-    }
-  }
+  static VtRenderRowSnapshot _asClean(VtRenderRowSnapshot row) => row.dirty
+      ? VtRenderRowSnapshot(dirty: false, raw: row.raw, cells: row.cells)
+      : row;
 
-  VtRenderCellSnapshot _snapshotCell(
-    bindings.GhosttyRenderStateRowCells cells,
-  ) {
-    final raw = calloc<bindings.GhosttyCell>();
-    final style = calloc<bindings.GhosttyStyle>();
-    final graphemeLen = calloc<ffi.Uint32>();
-    try {
-      style.ref.size = ffi.sizeOf<bindings.GhosttyStyle>();
-      _checkResult(
-        bindings.ghostty_render_state_row_cells_get(
-          cells,
-          bindings
-              .GhosttyRenderStateRowCellsData
-              .GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_RAW,
-          raw.cast(),
-        ),
-        'ghostty_render_state_row_cells_get',
-      );
-      _checkResult(
-        bindings.ghostty_render_state_row_cells_get(
-          cells,
-          bindings
-              .GhosttyRenderStateRowCellsData
-              .GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_STYLE,
-          style.cast(),
-        ),
-        'ghostty_render_state_row_cells_get',
-      );
-      _checkResult(
-        bindings.ghostty_render_state_row_cells_get(
-          cells,
-          bindings
-              .GhosttyRenderStateRowCellsData
-              .GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_GRAPHEMES_LEN,
-          graphemeLen.cast(),
-        ),
-        'ghostty_render_state_row_cells_get',
-      );
-      final graphemes = graphemeLen.value == 0
-          ? ''
-          : (() {
-              final buffer = calloc<ffi.Uint32>(graphemeLen.value);
-              try {
-                _checkResult(
-                  bindings.ghostty_render_state_row_cells_get(
-                    cells,
-                    bindings
-                        .GhosttyRenderStateRowCellsData
-                        .GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_GRAPHEMES_BUF,
-                    buffer.cast(),
-                  ),
-                  'ghostty_render_state_row_cells_get',
-                );
-                return String.fromCharCodes(
-                  buffer.asTypedList(graphemeLen.value),
-                );
-              } finally {
-                calloc.free(buffer);
-              }
-            })();
-
-      return VtRenderCellSnapshot(
-        raw: VtCellSnapshot.fromRaw(raw.value),
-        style: VtStyle.fromNative(style.ref),
-        graphemes: graphemes,
-      );
-    } finally {
-      calloc.free(graphemeLen);
-      calloc.free(style);
-      calloc.free(raw);
-    }
+  VtRenderRowSnapshot _snapshotRowFrom(
+    VtRenderRowCursor row, {
+    required bool dirty,
+  }) {
+    final cells = <VtRenderCellSnapshot>[];
+    row.visitCells((cursor) {
+      while (cursor.moveNext()) {
+        cells.add(cursor.current);
+      }
+    });
+    return VtRenderRowSnapshot(dirty: dirty, raw: row.raw, cells: cells);
   }
 
   void close() {
@@ -3723,6 +3807,7 @@ final class VtRenderState {
       return;
     }
     bindings.ghostty_render_state_free(_handle);
+    invalidateSnapshotCache();
     _closed = true;
   }
 }

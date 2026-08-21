@@ -110,38 +110,36 @@ void main() {
     expect(tester.testTextInput.hasAnyClients, isFalse);
   }, variant: _android);
 
-  testWidgets(
-    'controller.show() attaches; deletion delta sends backspace',
-    (tester) async {
-      if (!_hasNativeTerminal) {
-        return;
-      }
-      final focusNode = FocusNode();
-      addTearDown(focusNode.dispose);
-      final softKeyboard = GhosttyTerminalSoftKeyboardController();
-      await tester.pumpWidget(buildView(focusNode, softKeyboard));
-      await tester.pump();
+  testWidgets('controller.show() attaches; deletion delta sends backspace', (
+    tester,
+  ) async {
+    if (!_hasNativeTerminal) {
+      return;
+    }
+    final focusNode = FocusNode();
+    addTearDown(focusNode.dispose);
+    final softKeyboard = GhosttyTerminalSoftKeyboardController();
+    await tester.pumpWidget(buildView(focusNode, softKeyboard));
+    await tester.pump();
 
-      softKeyboard.show();
-      await tester.pump();
-      expect(tester.testTextInput.hasAnyClients, isTrue);
+    softKeyboard.show();
+    await tester.pump();
+    expect(tester.testTextInput.hasAnyClients, isTrue);
 
-      captured.clear();
-      await _sendDeltas(tester, [
-        _encodeDelta(
-          oldText: _seed,
-          deltaText: '',
-          deltaStart: _seed.length - 1,
-          deltaEnd: _seed.length,
-          selection: _seed.length - 1,
-        ),
-      ]);
+    captured.clear();
+    await _sendDeltas(tester, [
+      _encodeDelta(
+        oldText: _seed,
+        deltaText: '',
+        deltaStart: _seed.length - 1,
+        deltaEnd: _seed.length,
+        selection: _seed.length - 1,
+      ),
+    ]);
 
-      final backspaces = captured.where((b) => b == 0x7f || b == 0x08).length;
-      expect(backspaces, 1, reason: 'deletion delta must yield one backspace');
-    },
-    variant: _android,
-  );
+    final backspaces = captured.where((b) => b == 0x7f || b == 0x08).length;
+    expect(backspaces, 1, reason: 'deletion delta must yield one backspace');
+  }, variant: _android);
 
   testWidgets('controller.toggle() raises then dismisses the keyboard', (
     tester,

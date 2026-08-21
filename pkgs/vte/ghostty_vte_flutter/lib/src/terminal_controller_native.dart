@@ -26,23 +26,38 @@ class GhosttyTerminalController extends ChangeNotifier
     implements GhosttyTerminalSessionController {
   GhosttyTerminalController({
     this.maxLines = 2000,
-    this.maxScrollback = 10_000,
+    this.maxScrollback = 64 << 20,
+    int? maxScrollbackLines,
     this.initialCols = 80,
     this.initialRows = 24,
     this.preferPty = true,
     this.defaultShell,
   }) : assert(maxLines > 0),
        assert(maxScrollback >= 0),
+       assert(maxScrollbackLines == null || maxScrollbackLines >= 0),
        assert(initialCols > 0),
        assert(initialRows > 0),
+       maxScrollbackLines = maxScrollbackLines ?? maxLines,
        _cols = initialCols,
        _rows = initialRows;
 
   /// Maximum retained line count in the formatted terminal snapshot.
   final int maxLines;
 
-  /// Maximum terminal scrollback depth retained by [VtTerminal].
+  /// Maximum scrollback the engine retains, in BYTES, not lines.
+  ///
+  /// It is a memory ceiling, and it binds independently of
+  /// [maxScrollbackLines] — whichever runs out first wins. Sizing it is
+  /// width-dependent: a 10k-row history costs roughly 7 MB at 80 columns and
+  /// 17 MB at 202, so a budget that looks generous for a narrow terminal
+  /// quietly truncates a wide one. Express the intent in
+  /// [maxScrollbackLines] and leave this as headroom.
   final int maxScrollback;
+
+  /// Maximum scrollback the engine retains, in rows. Defaults to [maxLines]:
+  /// the transcript cannot show history the engine has already dropped, so the
+  /// two budgets meaning different things is always a bug.
+  final int maxScrollbackLines;
 
   /// Initial terminal width in cells before the view reports a real size.
   final int initialCols;
@@ -109,6 +124,18 @@ class GhosttyTerminalController extends ChangeNotifier
   /// null whenever 1004 is disabled, so the desired state is re-asserted on the
   /// next enable.
   bool? _sentFocus;
+
+  /// Set when output arrived but the snapshot was not rebuilt, either because
+  /// nothing is listening or because the guest is mid-frame under DEC 2026.
+  /// Snapshot getters settle it before answering.
+  bool _snapshotStale = false;
+  bool _formattedStale = false;
+
+  /// Wall-clock ceiling on DEC 2026 deferral. A guest that sets BSU and dies
+  /// before ESU must not freeze the view, so the deferral is bounded by both
+  /// this timer and the check on the next ingest.
+  static const _syncOutputMaxDefer = Duration(milliseconds: 100);
+  Timer? _syncOutputFlush;
 
   /// Monotonic value that increments whenever buffered output/state changes.
   @override
@@ -189,10 +216,16 @@ class GhosttyTerminalController extends ChangeNotifier
   }
 
   /// Current formatted plain-text terminal snapshot.
-  String get plainText => _plainText;
+  String get plainText {
+    _settleFormatted();
+    return _plainText;
+  }
 
   /// Current styled terminal snapshot used by [GhosttyTerminalView].
-  GhosttyTerminalSnapshot get snapshot => _snapshot;
+  GhosttyTerminalSnapshot get snapshot {
+    _settleFormatted();
+    return _snapshot;
+  }
 
   /// Native Ghostty render-state snapshot for the current visible viewport.
   ///
@@ -200,7 +233,10 @@ class GhosttyTerminalController extends ChangeNotifier
   /// through scrollback as the [scrollViewportByRows]/[scrollViewportToTop]/
   /// [scrollViewportToBottom] methods drive the engine, so unlike the
   /// formatter path this snapshot can represent scrollback rows directly.
-  GhosttyTerminalRenderSnapshot? get renderSnapshot => _renderSnapshot;
+  GhosttyTerminalRenderSnapshot? get renderSnapshot {
+    _settleSnapshot();
+    return _renderSnapshot;
+  }
 
   /// Whether the engine viewport is currently anchored to the live bottom.
   ///
@@ -344,10 +380,16 @@ class GhosttyTerminalController extends ChangeNotifier
   String Function()? onXtversionData;
 
   /// Current buffered terminal lines.
-  List<String> get lines => List<String>.unmodifiable(_lines);
+  List<String> get lines {
+    _settleFormatted();
+    return List<String>.unmodifiable(_lines);
+  }
 
   /// Number of buffered lines.
-  int get lineCount => _lines.length;
+  int get lineCount {
+    _settleFormatted();
+    return _lines.length;
+  }
 
   VtTerminal _ensureTerminal() {
     final existing = _terminal;
@@ -359,6 +401,7 @@ class GhosttyTerminalController extends ChangeNotifier
       cols: _cols,
       rows: _rows,
       maxScrollback: maxScrollback,
+      maxScrollbackLines: maxScrollbackLines,
     );
 
     // Forward terminal write-back data (DSR responses, mode queries, etc.)
@@ -905,6 +948,19 @@ class GhosttyTerminalController extends ChangeNotifier
     if (_viewportFollowingBottom) {
       terminal.scrollToBottom();
     }
+    if (_deferForSyncOutput(terminal)) {
+      // Mid-frame: the guest will emit ESU when the repaint is complete. Skip
+      // the rebuild AND the notify — notifying would pull a listener straight
+      // back into the snapshot getters and undo the deferral.
+      //
+      // Both layers are marked stale: the bytes are already in the engine, so
+      // a caller that reads `plainText`/`lines`/`snapshot` before ESU must see
+      // them rather than the transcript from before this frame started.
+      _snapshotStale = true;
+      _formattedStale = true;
+      _flushFocusReport();
+      return;
+    }
     _refreshSnapshot();
     // Ingested output is what flips DEC mode 1004, so re-assert the latched
     // focus state here — this covers every ingest path (PTY, external
@@ -913,17 +969,96 @@ class GhosttyTerminalController extends ChangeNotifier
     _markDirty();
   }
 
+  /// Whether the guest is mid-frame under DEC 2026 (synchronized output).
+  ///
+  /// Agents that repaint under BSU/ESU (Codex, and any ratatui TUI) hand us an
+  /// explicit frame boundary. The bridge batches PTY bytes on a fixed timer, so
+  /// without this one logical repaint is torn into several chunks and each one
+  /// pays a full snapshot — for intermediate states that are never painted.
+  bool _deferForSyncOutput(VtTerminal terminal) {
+    bool active;
+    try {
+      active = terminal.getMode(VtModes.syncOutput);
+    } catch (_) {
+      active = false;
+    }
+    if (!active) {
+      _syncOutputFlush?.cancel();
+      _syncOutputFlush = null;
+      return false;
+    }
+    _syncOutputFlush ??= Timer(_syncOutputMaxDefer, () {
+      _syncOutputFlush = null;
+      if (_disposed || !_snapshotStale) return;
+      _refreshSnapshot();
+      _markDirty();
+    });
+    return true;
+  }
+
+  /// Rebuilds the engine render snapshot if output landed while it was being
+  /// skipped.
+  void _settleSnapshot() {
+    if (!_snapshotStale || _disposed) return;
+    // Cleared only once the rebuild has actually happened: clearing first would
+    // turn a single throw out of the render state into a controller that serves
+    // the stale snapshot forever, never retrying.
+    _refreshRenderNow();
+    _snapshotStale = false;
+  }
+
+  /// Rebuilds the formatter-derived transcript on first read.
+  ///
+  /// [plainText], [lines] and [snapshot] cost three full-buffer formatter
+  /// passes plus a UTF-8 decode of the whole scrollback, and the native paint
+  /// path reads none of them - it draws from [renderSnapshot]. Deferring them
+  /// to an actual reader keeps that cost off the ingest path entirely for a
+  /// view using the render-state renderer.
+  void _settleFormatted() {
+    if (!_formattedStale || _disposed) return;
+    _refreshFormattedNow();
+    _formattedStale = false;
+  }
+
+  /// Rebuilds the snapshot, unless nobody is looking.
+  ///
+  /// A controller with no listener has no view attached, so every byte it
+  /// ingests would otherwise pay a full formatter + render-state rebuild for a
+  /// frame that is never painted. Antgrid runs one controller per terminal and
+  /// shows one at a time, so this is the difference between paying for one
+  /// agent and paying for all of them. [_settleSnapshot] closes the gap the
+  /// moment a getter asks.
   void _refreshSnapshot() {
+    if (_disposed) return;
+    _snapshotStale = true;
+    _formattedStale = true;
+    if (!hasListeners) return;
+    // Deliberately NOT _settleFormatted(): the transcript is rebuilt when
+    // something reads it, not when bytes arrive.
+    _settleSnapshot();
+  }
+
+  /// Rebuilds ONLY the engine render snapshot.
+  void _refreshRenderNow() {
+    final renderState = _renderState;
+    if (renderState == null) {
+      _renderSnapshot = null;
+      return;
+    }
+    renderState.update();
+    _renderSnapshot = _toRenderSnapshot(renderState.snapshot());
+  }
+
+  /// Rebuilds ONLY the formatter-derived transcript fields.
+  void _refreshFormattedNow() {
     final formatter = _plainFormatter;
     final styledFormatter = _styledFormatter;
-    final renderState = _renderState;
-    if (formatter == null || styledFormatter == null || renderState == null) {
+    if (formatter == null || styledFormatter == null) {
       _plainText = '';
       _lines
         ..clear()
         ..add('');
       _snapshot = const GhosttyTerminalSnapshot.empty();
-      _renderSnapshot = null;
       return;
     }
 
@@ -960,8 +1095,6 @@ class GhosttyTerminalController extends ChangeNotifier
       maxLines: maxLines,
       wrappedRows: wrappedRows,
     );
-    renderState.update();
-    _renderSnapshot = _toRenderSnapshot(renderState.snapshot());
   }
 
   /// Refreshes ONLY the engine render-state snapshot for the current viewport.
@@ -975,10 +1108,17 @@ class GhosttyTerminalController extends ChangeNotifier
     final renderState = _renderState;
     if (renderState == null) {
       _renderSnapshot = null;
+      _snapshotStale = false;
       return;
     }
-    renderState.update();
-    _renderSnapshot = _toRenderSnapshot(renderState.snapshot());
+    // Row reuse inside `snapshot()` is keyed on viewport position. A scroll
+    // moves the window without changing screen content, so positions remap
+    // with no dirty bit to signal it.
+    renderState.invalidateSnapshotCache();
+    _refreshRenderNow();
+    // The render snapshot is now current, so a getter must not walk the
+    // viewport a second time for output that this rebuild already picked up.
+    _snapshotStale = false;
   }
 
   /// Computes the set of zero-based row indices (within [wrappedLines]) that
@@ -1096,6 +1236,8 @@ class GhosttyTerminalController extends ChangeNotifier
     _mouseEncoder?.close();
     _mouseEncoder = null;
     _renderState?.close();
+    _syncOutputFlush?.cancel();
+    _syncOutputFlush = null;
     _renderState = null;
     _plainFormatter?.close();
     _plainFormatter = null;
