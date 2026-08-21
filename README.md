@@ -1,8 +1,8 @@
 # dart_terminal (Antgrid fork)
 
-[![Analyze](https://github.com/bharathm03/dart_terminal/actions/workflows/analyze.yml/badge.svg)](https://github.com/bharathm03/dart_terminal/actions/workflows/analyze.yml)
-[![VTE](https://github.com/bharathm03/dart_terminal/actions/workflows/vte.yml/badge.svg)](https://github.com/bharathm03/dart_terminal/actions/workflows/vte.yml)
-[![PTY](https://github.com/bharathm03/dart_terminal/actions/workflows/pty.yml/badge.svg)](https://github.com/bharathm03/dart_terminal/actions/workflows/pty.yml)
+[![Analyze](https://github.com/antgrid-ai/dart_terminal/actions/workflows/analyze.yml/badge.svg)](https://github.com/antgrid-ai/dart_terminal/actions/workflows/analyze.yml)
+[![VTE](https://github.com/antgrid-ai/dart_terminal/actions/workflows/vte.yml/badge.svg)](https://github.com/antgrid-ai/dart_terminal/actions/workflows/vte.yml)
+[![PTY](https://github.com/antgrid-ai/dart_terminal/actions/workflows/pty.yml/badge.svg)](https://github.com/antgrid-ai/dart_terminal/actions/workflows/pty.yml)
 
 > **This is a fork of [kingwill101/dart_terminal](https://github.com/kingwill101/dart_terminal),**
 > branched at `d9d3096` and maintained for Antgrid. **Use upstream unless you
@@ -69,7 +69,7 @@ published to pub.dev — consume it as a git dependency.
 ## Quick start
 
 ```bash
-git clone https://github.com/bharathm03/dart_terminal.git
+git clone https://github.com/antgrid-ai/dart_terminal.git
 cd dart_terminal
 git submodule update --init --recursive
 flutter pub get
