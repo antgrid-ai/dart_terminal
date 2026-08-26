@@ -531,6 +531,14 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
   int _pendingSerialTapCount = 0;
   PointerDeviceKind _lastPointerKind = PointerDeviceKind.mouse;
 
+  /// The OSC 8 URI a touch tap landed on, held from the lift that suppressed
+  /// its forwarded click until [_handleTapUp] opens it.
+  ///
+  /// Carries the URI rather than a flag so the open uses the cell the finger
+  /// LANDED on: a tap may drift within `kTouchSlop`, and re-resolving against
+  /// the release point can miss the link by a cell.
+  String? _touchTapHyperlinkUri;
+
   /// Whether the pointer now down was pressed with the mouse-reporting bypass
   /// modifier held, so it drives this widget instead of the program.
   ///
@@ -2663,6 +2671,10 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
   // and the plain-scrollback path (`_startTouchScroll`) owns the finger.
 
   void _onTouchMousePointerDown(PointerDownEvent event) {
+    // Cleared ahead of the guards: a tap whose gesture never reached
+    // `_handleTapUp` (it lost the arena) would otherwise leave its URI armed
+    // for whatever the next tap turns out to be.
+    _touchTapHyperlinkUri = null;
     if (!_terminalMouseReportingCapturesPointerKind(PointerDeviceKind.touch)) {
       return;
     }
@@ -2741,6 +2753,20 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
         !_terminalMouseReportingCapturesPointerKind(PointerDeviceKind.touch)) {
       return;
     }
+    // An OSC 8 link is the program declaring these exact cells ARE a link,
+    // which is a more specific statement of intent than holding the mouse — and
+    // on touch there is no modifier to bypass with, so without this a link
+    // under a full-screen agent is unreachable. Explicit markup only: the
+    // bare-URL match is a guess about visible text, and stealing a TUI's clicks
+    // on a guess is a hole nobody can explain.
+    final downCell = _positionForOffset(downPosition, size, metrics);
+    if (downCell != null) {
+      final uri = widget.controller.hyperlinkUriAt(downCell);
+      if (uri != null) {
+        _touchTapHyperlinkUri = uri;
+        return;
+      }
+    }
     // Deferred click: press + release at the down cell (where the finger
     // landed), not the release cell — a tap may drift within `kTouchSlop`.
     _sendMouseEvent(
@@ -2786,6 +2812,11 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
   void _handleTapUp(Offset localPosition, Size size, _TerminalMetrics metrics) {
     widget.onTapTerminal?.call();
     _requestTerminalFocus();
+    if (_touchTapHyperlinkUri case final uri?) {
+      _touchTapHyperlinkUri = null;
+      unawaited(_openHyperlink(uri));
+      return;
+    }
     if (_currentPointerUsesTerminalMouse) {
       return;
     }
