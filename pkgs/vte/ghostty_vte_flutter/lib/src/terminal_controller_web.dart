@@ -311,6 +311,16 @@ class GhosttyTerminalController extends ChangeNotifier
   /// intent (see [setFocused]).
   bool get isFocused => false;
 
+  /// Web stub: `ghostty-vt.wasm` exports `ghostty_grid_ref_cell`/`_row`/
+  /// `_style`/`_graphemes` but not `ghostty_grid_ref_hyperlink_uri`, so the
+  /// URI behind an OSC 8 link cannot be read here at all. Present so
+  /// `terminal_view.dart` compiles for web, where it falls back to the
+  /// bare-URL match over visible text.
+  ///
+  /// Restoring this needs the wasm build to export the symbol first — do not
+  /// reach for the formatter snapshot instead, it does not round-trip OSC 8.
+  String? hyperlinkUriAt(GhosttyTerminalCellPosition position) => null;
+
   /// Web keeps transport setup separate, so profile starts are a no-op wrapper.
   Future<GhosttyTerminalShellLaunch?> startShellProfile({
     required GhosttyTerminalShellProfile profile,

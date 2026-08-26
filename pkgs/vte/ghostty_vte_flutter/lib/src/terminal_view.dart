@@ -531,6 +531,14 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
   int _pendingSerialTapCount = 0;
   PointerDeviceKind _lastPointerKind = PointerDeviceKind.mouse;
 
+  /// Whether the pointer now down was pressed with the mouse-reporting bypass
+  /// modifier held, so it drives this widget instead of the program.
+  ///
+  /// Latched at press and left alone until the next press, exactly like
+  /// [_lastPointerKind]: the modifier can be released mid-gesture, and a press
+  /// the program never saw must not be followed by a release it does.
+  bool _lastPointerBypassedTerminalMouse = false;
+
   /// The button each pointer went down with, so its release can name it.
   ///
   /// `PointerUpEvent.buttons` is already 0 by the time the release arrives, so
@@ -2007,6 +2015,7 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
   }
 
   bool get _currentPointerUsesTerminalMouse =>
+      !_lastPointerBypassedTerminalMouse &&
       _terminalMouseReportingCapturesPointerKind(_lastPointerKind);
 
   Set<PointerDeviceKind> get _selectionDragDevices {
@@ -2033,6 +2042,16 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
     // released after it went off, and that release still has to clear its entry.
     final resolvedButton = _resolveMouseButton(action, event, button);
     if (!_terminalMouseReportingCapturesPointerKind(event.kind)) {
+      return;
+    }
+    // Suppress the whole press-motion-release span of a bypassed gesture, so
+    // the program is never handed half of a click. Bare hover carries no
+    // button and is not part of that span, so motion tracking survives a
+    // bypassed click.
+    if (_lastPointerBypassedTerminalMouse &&
+        (action == GhosttyMouseAction.GHOSTTY_MOUSE_ACTION_PRESS ||
+            action == GhosttyMouseAction.GHOSTTY_MOUSE_ACTION_RELEASE ||
+            event.buttons != 0)) {
       return;
     }
 
@@ -3231,8 +3250,16 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
               }
             },
             onHover: (event) {
-              if (!_terminalMouseReportingEnabled) {
+              // Under mouse reporting the affordance follows the bypass, or
+              // Shift+click would be an invisible shortcut: no cursor change,
+              // no underline, nothing saying a link is reachable at all.
+              if (!_terminalMouseReportingEnabled ||
+                  HardwareKeyboard.instance.isShiftPressed) {
                 _updateHoveredHyperlink(event.localPosition, size, metrics);
+              } else if (ghosttyTerminalClearHoveredLink<
+                GhosttyTerminalSelection
+              >(session: _selectionSession)) {
+                setState(() {});
               }
               _sendMouseEvent(
                 GhosttyMouseAction.GHOSTTY_MOUSE_ACTION_MOTION,
@@ -3244,6 +3271,14 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
             child: Listener(
               onPointerDown: (event) {
                 _lastPointerKind = event.kind;
+                // Shift is the long-standing xterm escape hatch from mouse
+                // reporting (kitty, WezTerm and Ghostty all honour it), and it
+                // is what makes a hyperlink reachable at all under a
+                // full-screen agent that has taken the mouse. Touch has no
+                // modifier to hold, so it stays with the program.
+                _lastPointerBypassedTerminalMouse =
+                    event.kind != PointerDeviceKind.touch &&
+                    HardwareKeyboard.instance.isShiftPressed;
                 _startTouchScroll(event);
                 _requestTerminalFocus();
                 // Touch defers its PRESS to pointer-up (tap → click) or

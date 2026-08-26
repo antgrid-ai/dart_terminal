@@ -2243,6 +2243,115 @@ void main() {
       expect(openedUri, uri);
     });
 
+    // Under mouse reporting the program owns the pointer, so a plain click on a
+    // link has to keep reaching the program — Shift is the escape hatch, and it
+    // must not leave the program holding half a click.
+    Future<String?> clickLinkUnderMouseReporting(
+      WidgetTester tester,
+      _RecordingTerminalController controller, {
+      required bool holdShift,
+    }) async {
+      String? openedUri;
+      controller.terminal.setMode(VtModes.normalMouse, true);
+      controller.terminal.setMode(VtModes.sgrMouse, true);
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: SizedBox(
+              width: 600,
+              height: 400,
+              child: GhosttyTerminalView(
+                controller: controller,
+                autofocus: true,
+                showHeader: false,
+                onOpenHyperlink: (uri) async {
+                  openedUri = uri;
+                },
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      const uri = 'https://github.com/antgrid-ai/antgrid/pull/13';
+      controller.appendDebugOutput(']8;;$uriantgrid-ai/antgrid#13]8;;');
+      await tester.pumpAndSettle();
+
+      final (:charWidth, :linePixels, :padding) = _measureTestMetrics();
+      final target = Offset(
+        (padding + (5 * charWidth) + (charWidth ~/ 2)).toDouble(),
+        (padding + (linePixels ~/ 2)).toDouble(),
+      );
+
+      if (holdShift) {
+        await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
+      }
+      final gesture = await _startMouseGesture(tester, target);
+      await tester.pump(const Duration(milliseconds: 40));
+      await gesture.up();
+      await tester.pumpAndSettle();
+      if (holdShift) {
+        await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
+      }
+      return openedUri;
+    }
+
+    testWidgets(
+      'a plain click under mouse reporting still drives the program',
+      (tester) async {
+        if (!hasNativeTerminal) {
+          return;
+        }
+
+        final controller = _RecordingTerminalController();
+        addTearDown(controller.dispose);
+
+        final opened = await clickLinkUnderMouseReporting(
+          tester,
+          controller,
+          holdShift: false,
+        );
+
+        expect(opened, isNull);
+        expect(
+          controller.mouseEvents.map((event) => event.action),
+          contains(GhosttyMouseAction.GHOSTTY_MOUSE_ACTION_PRESS),
+        );
+      },
+    );
+
+    testWidgets('Shift+click under mouse reporting opens the link instead', (
+      tester,
+    ) async {
+      if (!hasNativeTerminal) {
+        return;
+      }
+
+      final controller = _RecordingTerminalController();
+      addTearDown(controller.dispose);
+
+      final opened = await clickLinkUnderMouseReporting(
+        tester,
+        controller,
+        holdShift: true,
+      );
+
+      expect(opened, 'https://github.com/antgrid-ai/antgrid/pull/13');
+      // Both halves suppressed, not just the press: a release the program was
+      // never handed a press for leaves it tracking a button that is not down.
+      final actions = controller.mouseEvents.map((event) => event.action);
+      expect(
+        actions,
+        isNot(contains(GhosttyMouseAction.GHOSTTY_MOUSE_ACTION_PRESS)),
+      );
+      expect(
+        actions,
+        isNot(contains(GhosttyMouseAction.GHOSTTY_MOUSE_ACTION_RELEASE)),
+      );
+    });
+
     testWidgets(
       'renderState double click selects wrapped URLs across visible rows',
       (tester) async {
