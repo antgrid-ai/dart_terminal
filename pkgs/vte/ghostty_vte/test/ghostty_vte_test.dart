@@ -1212,4 +1212,68 @@ void main() {
     expect(terminal.widthPx, 80 * 10);
     expect(terminal.heightPx, 24 * 20);
   });
+  group('OSC 8 hyperlinks', () {
+    // The styled VT formatter does not round-trip OSC 8, so the grid is the
+    // only place a link's URI survives. These pin that it stays reachable.
+    const url = 'https://github.com/antgrid-ai/antgrid/pull/13';
+    final esc = String.fromCharCode(27);
+    final st = esc + String.fromCharCode(92);
+
+    test('the URI is readable from the cell the link covers', () {
+      final terminal = GhosttyVt.newTerminal(cols: 70, rows: 6);
+      addTearDown(terminal.close);
+      terminal.write(
+        'Opened: $esc]8;;$url${st}antgrid-ai/antgrid#13$esc]8;;$st',
+      );
+
+      // "Opened: " is 8 cells; the link text is the 21 that follow it.
+      expect(terminal.screenCell(8, 0).hyperlinkUri, url);
+      expect(terminal.screenCell(28, 0).hyperlinkUri, url);
+      expect(terminal.screenCell(7, 0).hyperlinkUri, isNull);
+      expect(terminal.screenCell(29, 0).hyperlinkUri, isNull);
+    });
+
+    test('a BEL terminator resolves the same as ST', () {
+      final bel = String.fromCharCode(7);
+      final terminal = GhosttyVt.newTerminal(cols: 70, rows: 6);
+      addTearDown(terminal.close);
+      terminal.write(
+        'Opened: $esc]8;;$url${bel}antgrid-ai/antgrid#13$esc]8;;$bel',
+      );
+
+      expect(terminal.screenCell(8, 0).hyperlinkUri, url);
+    });
+
+    test('hyperlinkUriAt resolves rows scrolled into scrollback', () {
+      final terminal = GhosttyVt.newTerminal(cols: 40, rows: 4);
+      addTearDown(terminal.close);
+      final nl = String.fromCharCodes([13, 10]);
+      terminal.write('a${nl}b${nl}c$nl');
+      terminal.write('LINK: $esc]8;;$url${st}click$esc]8;;$st$nl');
+      for (var i = 0; i < 10; i++) {
+        terminal.write('after $i$nl');
+      }
+
+      // Row 3 is now well inside scrollback, and screen points index from the
+      // top of history rather than the viewport.
+      expect(terminal.hyperlinkUriAt(const VtPoint.screen(6, 3)), url);
+      expect(terminal.hyperlinkUriAt(const VtPoint.screen(0, 3)), isNull);
+    });
+
+    test('hyperlinkUriAt answers null outside the grid', () {
+      final terminal = GhosttyVt.newTerminal(cols: 40, rows: 4);
+      addTearDown(terminal.close);
+      terminal.write('hello');
+
+      expect(terminal.hyperlinkUriAt(const VtPoint.screen(0, 9999)), isNull);
+    });
+
+    test('a bare URL printed as text carries no hyperlink', () {
+      final terminal = GhosttyVt.newTerminal(cols: 70, rows: 6);
+      addTearDown(terminal.close);
+      terminal.write('Opened: $url');
+
+      expect(terminal.screenCell(10, 0).hyperlinkUri, isNull);
+    });
+  });
 }

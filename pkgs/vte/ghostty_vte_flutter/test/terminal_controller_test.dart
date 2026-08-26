@@ -643,6 +643,52 @@ void main() {
       'https://example.com',
     );
   });
+  test('OSC 8 hyperlink URIs resolve through the controller', () {
+    if (!hasNativeTerminal) {
+      return;
+    }
+    final esc = String.fromCharCode(27);
+    final st = esc + String.fromCharCode(92);
+    const url = 'https://github.com/antgrid-ai/antgrid/pull/13';
+
+    final controller = GhosttyTerminalController(
+      initialCols: 70,
+      initialRows: 6,
+    );
+    addTearDown(controller.dispose);
+    controller.appendDebugOutput(
+      'Opened: $esc]8;;$url${st}antgrid-ai/antgrid#13$esc]8;;$st done',
+    );
+
+    // The link text is not itself a URL, so the formatter snapshot's
+    // bare-URL detection cannot see it and the styled formatter never
+    // round-trips the OSC 8 that would. Reading the grid is what makes a
+    // link like this clickable rather than merely underlined.
+    expect(
+      controller.snapshot.hyperlinkAt(
+        const GhosttyTerminalCellPosition(row: 0, col: 12),
+      ),
+      isNull,
+    );
+    expect(
+      controller.hyperlinkUriAt(
+        const GhosttyTerminalCellPosition(row: 0, col: 12),
+      ),
+      url,
+    );
+    expect(
+      controller.hyperlinkUriAt(
+        const GhosttyTerminalCellPosition(row: 0, col: 0),
+      ),
+      isNull,
+    );
+    expect(
+      controller.hyperlinkUriAt(
+        const GhosttyTerminalCellPosition(row: 999, col: 0),
+      ),
+      isNull,
+    );
+  });
 
   testWidgets('terminal view renders custom painter', (tester) async {
     if (!hasNativeTerminal) {

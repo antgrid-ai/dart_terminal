@@ -2204,6 +2204,45 @@ void main() {
       expect(openedUri, 'https://example.com/docs');
     });
 
+    testWidgets('taps open OSC 8 hyperlinks whose text is not a URL', (
+      tester,
+    ) async {
+      if (!hasNativeTerminal) {
+        return;
+      }
+
+      String? openedUri;
+
+      await tester.pumpWidget(
+        buildView(
+          showHeader: false,
+          autofocus: true,
+          onOpenHyperlink: (uri) async {
+            openedUri = uri;
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // Visible text that no URL regex could match, so a hit here can only come
+      // from the OSC 8 payload itself.
+      const uri = 'https://github.com/antgrid-ai/antgrid/pull/13';
+      const label = 'antgrid-ai/antgrid#13';
+      controller.appendDebugOutput('\x1b]8;;$uri\x07$label\x1b]8;;\x07');
+      await tester.pumpAndSettle();
+
+      final (:charWidth, :linePixels, :padding) = _measureTestMetrics();
+      await tester.tapAt(
+        Offset(
+          (padding + (5 * charWidth) + (charWidth ~/ 2)).toDouble(),
+          (padding + (linePixels ~/ 2)).toDouble(),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(openedUri, uri);
+    });
+
     testWidgets(
       'renderState double click selects wrapped URLs across visible rows',
       (tester) async {

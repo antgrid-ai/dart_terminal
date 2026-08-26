@@ -1091,6 +1091,14 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
   }
 
   String? _resolveHyperlinkUriAt(GhosttyTerminalCellPosition position) {
+    // OSC 8 first. The engine grid is the only place an explicit link's URI
+    // survives — neither snapshot carries it — and an explicit link must win
+    // over a bare-URL regex match that merely overlaps the same cells.
+    final explicit = widget.controller.hyperlinkUriAt(position);
+    if (explicit != null) {
+      return explicit;
+    }
+
     final renderSnapshot = widget.controller.renderSnapshot;
     if (widget.renderer == GhosttyTerminalRendererMode.renderState &&
         renderSnapshot != null &&
