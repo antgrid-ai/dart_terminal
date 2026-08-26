@@ -265,6 +265,31 @@ class GhosttyTerminalController extends ChangeNotifier
   /// (`absoluteRow = offset + viewportRowIndex`).
   VtTerminalScrollbar? get viewportScrollbar => _terminal?.scrollbar;
 
+  /// The OSC 8 hyperlink URI at [position], or null when that cell carries
+  /// none.
+  ///
+  /// Reads the engine grid rather than [snapshot]: the styled VT formatter
+  /// does not round-trip OSC 8, so a link's URI never reaches the formatter
+  /// snapshot and `snapshot.hyperlinkAt` can only ever find bare URLs printed
+  /// as visible text.
+  ///
+  /// [position] is an absolute screen row — the same space `snapshot.lines`
+  /// and [viewportScrollbar]'s total are indexed in — so rows scrolled up
+  /// into scrollback resolve as well as visible ones.
+  String? hyperlinkUriAt(GhosttyTerminalCellPosition position) {
+    if (position.row < 0 || position.col < 0) {
+      return null;
+    }
+    final terminal = _terminal;
+    if (terminal == null) {
+      return null;
+    }
+    if (position.row >= terminal.totalRows) {
+      return null;
+    }
+    return terminal.hyperlinkUriAt(VtPoint.screen(position.col, position.row));
+  }
+
   /// Scrolls the engine viewport by [deltaRows] within the scrollback.
   ///
   /// Positive [deltaRows] moves *up* into history (older content), negative

@@ -1333,6 +1333,7 @@ final class VtGridRefSnapshot {
     required this.row,
     required this.style,
     required this.graphemes,
+    this.hyperlinkUri,
   });
 
   final int x;
@@ -1341,6 +1342,13 @@ final class VtGridRefSnapshot {
   final VtRowSnapshot row;
   final VtStyle style;
   final String graphemes;
+
+  /// The OSC 8 hyperlink URI on this cell, or null when it carries none.
+  ///
+  /// The styled VT formatter does not round-trip OSC 8, so this is the only
+  /// way to recover the URI: [VtCellSnapshot.hasHyperlink] says a link is
+  /// present but never what it points at.
+  final String? hyperlinkUri;
 
   static VtGridRefSnapshot fromNative(
     ffi.Pointer<bindings.GhosttyGridRef> ref,
@@ -1400,12 +1408,52 @@ final class VtGridRefSnapshot {
         row: VtRowSnapshot.fromRaw(rowPtr.value),
         style: VtStyle.fromNative(stylePtr.ref),
         graphemes: graphemes,
+        hyperlinkUri: _hyperlinkUri(ref),
       );
     } finally {
       calloc.free(graphemeLen);
       calloc.free(stylePtr);
       calloc.free(rowPtr);
       calloc.free(cellPtr);
+    }
+  }
+
+  static String? _hyperlinkUri(ffi.Pointer<bindings.GhosttyGridRef> ref) {
+    final outLen = calloc<ffi.Size>();
+    try {
+      // Size probe first: a cell with no hyperlink answers SUCCESS/len 0, so
+      // OUT_OF_SPACE here is the success signal, not an error.
+      final probe = bindings.ghostty_grid_ref_hyperlink_uri(
+        ref,
+        ffi.nullptr,
+        0,
+        outLen,
+      );
+      if (probe != bindings.GhosttyResult.GHOSTTY_OUT_OF_SPACE &&
+          probe != bindings.GhosttyResult.GHOSTTY_SUCCESS) {
+        return null;
+      }
+      final length = outLen.value;
+      if (length == 0) {
+        return null;
+      }
+      final buffer = calloc<ffi.Uint8>(length);
+      try {
+        _checkResult(
+          bindings.ghostty_grid_ref_hyperlink_uri(
+            ref,
+            buffer,
+            length,
+            outLen,
+          ),
+          'grid_ref_hyperlink_uri',
+        );
+        return utf8.decode(buffer.asTypedList(outLen.value));
+      } finally {
+        calloc.free(buffer);
+      }
+    } finally {
+      calloc.free(outLen);
     }
   }
 }
@@ -3328,6 +3376,36 @@ final class VtTerminal {
 
   /// Resolves the history cell at zero-based column [x] and row [y].
   VtGridRefSnapshot historyCell(int x, int y) => gridRef(VtPoint.history(x, y));
+
+  /// The OSC 8 hyperlink URI at [point], or null when that cell carries none.
+  ///
+  /// Prefer this over [gridRef] when only the link matters: it skips the cell,
+  /// row, style and grapheme reads, which makes it cheap enough to call on
+  /// every pointer move for hover feedback.
+  ///
+  /// Returns null rather than throwing when [point] is outside the grid, so
+  /// callers can hit-test freely against a moving viewport.
+  String? hyperlinkUriAt(VtPoint point) {
+    _ensureOpen();
+    final out = calloc<bindings.GhosttyGridRef>();
+    final nativePoint = calloc<bindings.GhosttyPoint>();
+    try {
+      out.ref.size = ffi.sizeOf<bindings.GhosttyGridRef>();
+      point._writeTo(nativePoint.ref);
+      final result = bindings.ghostty_terminal_grid_ref(
+        _handle,
+        nativePoint.ref,
+        out,
+      );
+      if (result != bindings.GhosttyResult.GHOSTTY_SUCCESS) {
+        return null;
+      }
+      return VtGridRefSnapshot._hyperlinkUri(out);
+    } finally {
+      calloc.free(nativePoint);
+      calloc.free(out);
+    }
+  }
 
   /// Creates a formatter that reflects the terminal state on each call.
   VtTerminalFormatter createFormatter([
