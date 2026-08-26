@@ -2352,6 +2352,128 @@ void main() {
       );
     });
 
+    // Touch has no modifier to bypass with, so an explicit link has to be
+    // reachable by tap alone -- but only an explicit one.
+    Future<String?> tapUnderMouseReporting(
+      WidgetTester tester,
+      _RecordingTerminalController controller, {
+      required String output,
+      required int col,
+    }) async {
+      String? openedUri;
+      controller.terminal.setMode(VtModes.normalMouse, true);
+      controller.terminal.setMode(VtModes.sgrMouse, true);
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: SizedBox(
+              width: 600,
+              height: 400,
+              child: GhosttyTerminalView(
+                controller: controller,
+                autofocus: true,
+                showHeader: false,
+                onOpenHyperlink: (uri) async {
+                  openedUri = uri;
+                },
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      controller.appendDebugOutput(output);
+      await tester.pumpAndSettle();
+
+      final (:charWidth, :linePixels, :padding) = _measureTestMetrics();
+      await tester.tapAt(
+        Offset(
+          (padding + (col * charWidth) + (charWidth ~/ 2)).toDouble(),
+          (padding + (linePixels ~/ 2)).toDouble(),
+        ),
+      );
+      await tester.pumpAndSettle();
+      return openedUri;
+    }
+
+    testWidgets('a touch tap on an OSC 8 link opens it under mouse reporting', (
+      tester,
+    ) async {
+      if (!hasNativeTerminal) {
+        return;
+      }
+
+      final controller = _RecordingTerminalController();
+      addTearDown(controller.dispose);
+
+      const uri = 'https://github.com/antgrid-ai/antgrid/pull/13';
+      final opened = await tapUnderMouseReporting(
+        tester,
+        controller,
+        output: ']8;;$uriantgrid-ai/antgrid#13]8;;',
+        col: 5,
+      );
+
+      expect(opened, uri);
+      // The program must not also see the tap, or it reacts to a stray click
+      // while the browser opens.
+      expect(controller.mouseEvents, isEmpty);
+    });
+
+    testWidgets('a touch tap beside the link still drives the program', (
+      tester,
+    ) async {
+      if (!hasNativeTerminal) {
+        return;
+      }
+
+      final controller = _RecordingTerminalController();
+      addTearDown(controller.dispose);
+
+      const uri = 'https://github.com/antgrid-ai/antgrid/pull/13';
+      final opened = await tapUnderMouseReporting(
+        tester,
+        controller,
+        // Two leading spaces, so column 0 is outside the linked cells.
+        output: '  ]8;;$uriantgrid-ai/antgrid#13]8;;',
+        col: 0,
+      );
+
+      expect(opened, isNull);
+      expect(
+        controller.mouseEvents.map((event) => event.action),
+        contains(GhosttyMouseAction.GHOSTTY_MOUSE_ACTION_PRESS),
+      );
+    });
+
+    testWidgets('a touch tap on a bare URL stays with the program', (
+      tester,
+    ) async {
+      if (!hasNativeTerminal) {
+        return;
+      }
+
+      final controller = _RecordingTerminalController();
+      addTearDown(controller.dispose);
+
+      // No OSC 8 -- only the bare-URL match over visible text, which is a guess
+      // and must not take a click away from a program holding the mouse.
+      final opened = await tapUnderMouseReporting(
+        tester,
+        controller,
+        output: 'see https://example.com/docs for more',
+        col: 10,
+      );
+
+      expect(opened, isNull);
+      expect(
+        controller.mouseEvents.map((event) => event.action),
+        contains(GhosttyMouseAction.GHOSTTY_MOUSE_ACTION_PRESS),
+      );
+    });
+
     testWidgets(
       'renderState double click selects wrapped URLs across visible rows',
       (tester) async {
