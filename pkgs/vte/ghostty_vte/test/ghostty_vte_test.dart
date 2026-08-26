@@ -1222,7 +1222,9 @@ void main() {
     test('the URI is readable from the cell the link covers', () {
       final terminal = GhosttyVt.newTerminal(cols: 70, rows: 6);
       addTearDown(terminal.close);
-      terminal.write('Opened: $esc]8;;$url${st}antgrid-ai/antgrid#13$esc]8;;$st');
+      terminal.write(
+        'Opened: $esc]8;;$url${st}antgrid-ai/antgrid#13$esc]8;;$st',
+      );
 
       // "Opened: " is 8 cells; the link text is the 21 that follow it.
       expect(terminal.screenCell(8, 0).hyperlinkUri, url);
@@ -1235,7 +1237,9 @@ void main() {
       final bel = String.fromCharCode(7);
       final terminal = GhosttyVt.newTerminal(cols: 70, rows: 6);
       addTearDown(terminal.close);
-      terminal.write('Opened: $esc]8;;$url${bel}antgrid-ai/antgrid#13$esc]8;;$bel');
+      terminal.write(
+        'Opened: $esc]8;;$url${bel}antgrid-ai/antgrid#13$esc]8;;$bel',
+      );
 
       expect(terminal.screenCell(8, 0).hyperlinkUri, url);
     });

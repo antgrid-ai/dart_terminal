@@ -1440,12 +1440,7 @@ final class VtGridRefSnapshot {
       final buffer = calloc<ffi.Uint8>(length);
       try {
         _checkResult(
-          bindings.ghostty_grid_ref_hyperlink_uri(
-            ref,
-            buffer,
-            length,
-            outLen,
-          ),
+          bindings.ghostty_grid_ref_hyperlink_uri(ref, buffer, length, outLen),
           'grid_ref_hyperlink_uri',
         );
         return utf8.decode(buffer.asTypedList(outLen.value));

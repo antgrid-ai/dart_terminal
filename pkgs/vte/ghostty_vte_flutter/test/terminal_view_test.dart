@@ -2228,9 +2228,7 @@ void main() {
       // from the OSC 8 payload itself.
       const uri = 'https://github.com/antgrid-ai/antgrid/pull/13';
       const label = 'antgrid-ai/antgrid#13';
-      controller.appendDebugOutput(
-        '\x1b]8;;$uri\x07$label\x1b]8;;\x07',
-      );
+      controller.appendDebugOutput('\x1b]8;;$uri\x07$label\x1b]8;;\x07');
       await tester.pumpAndSettle();
 
       final (:charWidth, :linePixels, :padding) = _measureTestMetrics();
