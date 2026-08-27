@@ -2243,13 +2243,19 @@ void main() {
       expect(openedUri, uri);
     });
 
-    // Under mouse reporting the program owns the pointer, so a plain click on a
-    // link has to keep reaching the program — Shift is the escape hatch, and it
-    // must not leave the program holding half a click.
+    // Under mouse reporting the program owns the pointer, with one carve-out:
+    // cells it marked up as an explicit OSC 8 link. Everything else — bare-URL
+    // matches, ordinary cells, non-primary buttons — keeps reaching it, and
+    // neither path may leave it holding half a click.
     Future<String?> clickLinkUnderMouseReporting(
       WidgetTester tester,
       _RecordingTerminalController controller, {
       required bool holdShift,
+      String output =
+          '\x1B]8;;https://github.com/antgrid-ai/antgrid/pull/13\x07'
+          'antgrid-ai/antgrid#13\x1B]8;;\x07',
+      int col = 5,
+      int buttons = kPrimaryButton,
     }) async {
       String? openedUri;
       controller.terminal.setMode(VtModes.normalMouse, true);
@@ -2275,20 +2281,23 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      const uri = 'https://github.com/antgrid-ai/antgrid/pull/13';
-      controller.appendDebugOutput(']8;;$uriantgrid-ai/antgrid#13]8;;');
+      controller.appendDebugOutput(output);
       await tester.pumpAndSettle();
 
       final (:charWidth, :linePixels, :padding) = _measureTestMetrics();
       final target = Offset(
-        (padding + (5 * charWidth) + (charWidth ~/ 2)).toDouble(),
+        (padding + (col * charWidth) + (charWidth ~/ 2)).toDouble(),
         (padding + (linePixels ~/ 2)).toDouble(),
       );
 
       if (holdShift) {
         await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
       }
-      final gesture = await _startMouseGesture(tester, target);
+      final gesture = await _startMouseGesture(
+        tester,
+        target,
+        buttons: buttons,
+      );
       await tester.pump(const Duration(milliseconds: 40));
       await gesture.up();
       await tester.pumpAndSettle();
@@ -2298,31 +2307,242 @@ void main() {
       return openedUri;
     }
 
-    testWidgets(
-      'a plain click under mouse reporting still drives the program',
-      (tester) async {
-        if (!hasNativeTerminal) {
-          return;
-        }
+    testWidgets('a plain click under mouse reporting opens an OSC 8 link', (
+      tester,
+    ) async {
+      if (!hasNativeTerminal) {
+        return;
+      }
 
-        final controller = _RecordingTerminalController();
-        addTearDown(controller.dispose);
+      final controller = _RecordingTerminalController();
+      addTearDown(controller.dispose);
 
-        final opened = await clickLinkUnderMouseReporting(
-          tester,
-          controller,
-          holdShift: false,
-        );
+      final opened = await clickLinkUnderMouseReporting(
+        tester,
+        controller,
+        holdShift: false,
+      );
 
-        expect(opened, isNull);
-        expect(
-          controller.mouseEvents.map((event) => event.action),
-          contains(GhosttyMouseAction.GHOSTTY_MOUSE_ACTION_PRESS),
-        );
-      },
-    );
+      expect(opened, 'https://github.com/antgrid-ai/antgrid/pull/13');
+      // Both halves withheld: a release with no press leaves the program
+      // tracking a button that is not down.
+      final actions = controller.mouseEvents.map((event) => event.action);
+      expect(
+        actions,
+        isNot(contains(GhosttyMouseAction.GHOSTTY_MOUSE_ACTION_PRESS)),
+      );
+      expect(
+        actions,
+        isNot(contains(GhosttyMouseAction.GHOSTTY_MOUSE_ACTION_RELEASE)),
+      );
+    });
 
-    testWidgets('Shift+click under mouse reporting opens the link instead', (
+    testWidgets('a plain click beside the link still drives the program', (
+      tester,
+    ) async {
+      if (!hasNativeTerminal) {
+        return;
+      }
+
+      final controller = _RecordingTerminalController();
+      addTearDown(controller.dispose);
+
+      final opened = await clickLinkUnderMouseReporting(
+        tester,
+        controller,
+        holdShift: false,
+        // Two leading spaces, so column 0 is outside the linked cells.
+        output:
+            '  \x1B]8;;https://github.com/antgrid-ai/antgrid/pull/13\x07'
+            'antgrid-ai/antgrid#13\x1B]8;;\x07',
+        col: 0,
+      );
+
+      expect(opened, isNull);
+      expect(
+        controller.mouseEvents.map((event) => event.action),
+        contains(GhosttyMouseAction.GHOSTTY_MOUSE_ACTION_PRESS),
+      );
+    });
+
+    testWidgets('a right click on the link still drives the program', (
+      tester,
+    ) async {
+      if (!hasNativeTerminal) {
+        return;
+      }
+
+      final controller = _RecordingTerminalController();
+      addTearDown(controller.dispose);
+
+      final opened = await clickLinkUnderMouseReporting(
+        tester,
+        controller,
+        holdShift: false,
+        buttons: kSecondaryButton,
+      );
+
+      expect(opened, isNull);
+      expect(
+        controller.mouseEvents.map((event) => event.action),
+        contains(GhosttyMouseAction.GHOSTTY_MOUSE_ACTION_PRESS),
+      );
+    });
+
+    testWidgets('a plain click on a bare URL stays with the program', (
+      tester,
+    ) async {
+      if (!hasNativeTerminal) {
+        return;
+      }
+
+      final controller = _RecordingTerminalController();
+      addTearDown(controller.dispose);
+
+      final opened = await clickLinkUnderMouseReporting(
+        tester,
+        controller,
+        holdShift: false,
+        // No OSC 8 anywhere: a regex guess about visible text is not grounds
+        // for taking a click off a program that asked for the mouse.
+        output: 'see https://example.com/docs for more',
+        col: 6,
+      );
+
+      expect(opened, isNull);
+      expect(
+        controller.mouseEvents.map((event) => event.action),
+        contains(GhosttyMouseAction.GHOSTTY_MOUSE_ACTION_PRESS),
+      );
+    });
+
+    // The affordance has to agree with the click, or the cell paints as a link
+    // and nothing about hovering it says whether that means anything.
+    Future<MouseCursor> hoverCursorUnderMouseReporting(
+      WidgetTester tester,
+      _RecordingTerminalController controller, {
+      required String output,
+      required int col,
+    }) async {
+      controller.terminal.setMode(VtModes.normalMouse, true);
+      controller.terminal.setMode(VtModes.sgrMouse, true);
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: SizedBox(
+              width: 600,
+              height: 400,
+              child: GhosttyTerminalView(
+                controller: controller,
+                autofocus: true,
+                showHeader: false,
+                onOpenHyperlink: (uri) async {},
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      controller.appendDebugOutput(output);
+      await tester.pumpAndSettle();
+
+      final (:charWidth, :linePixels, :padding) = _measureTestMetrics();
+      final gesture = await tester.createGesture(
+        kind: ui.PointerDeviceKind.mouse,
+      );
+      await gesture.addPointer(location: Offset.zero);
+      addTearDown(gesture.removePointer);
+      await tester.pump();
+      await gesture.moveTo(
+        Offset(
+          (padding + (col * charWidth) + (charWidth ~/ 2)).toDouble(),
+          (padding + (linePixels ~/ 2)).toDouble(),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      return tester
+          .widget<MouseRegion>(
+            find
+                .descendant(
+                  of: find.byType(GhosttyTerminalView),
+                  matching: find.byType(MouseRegion),
+                )
+                .first,
+          )
+          .cursor;
+    }
+
+    testWidgets('hovering an OSC 8 link under mouse reporting marks it', (
+      tester,
+    ) async {
+      if (!hasNativeTerminal) {
+        return;
+      }
+
+      final controller = _RecordingTerminalController();
+      addTearDown(controller.dispose);
+
+      final cursor = await hoverCursorUnderMouseReporting(
+        tester,
+        controller,
+        output:
+            '\x1B]8;;https://github.com/antgrid-ai/antgrid/pull/13\x07'
+            'antgrid-ai/antgrid#13\x1B]8;;\x07',
+        col: 5,
+      );
+
+      expect(cursor, SystemMouseCursors.click);
+    });
+
+    testWidgets('hovering a bare URL under mouse reporting does not', (
+      tester,
+    ) async {
+      if (!hasNativeTerminal) {
+        return;
+      }
+
+      final controller = _RecordingTerminalController();
+      addTearDown(controller.dispose);
+
+      // A plain click here goes to the program, so the pointer must not
+      // advertise otherwise. Shift is what makes this one reachable.
+      final cursor = await hoverCursorUnderMouseReporting(
+        tester,
+        controller,
+        output: 'see https://example.com/docs for more',
+        col: 6,
+      );
+
+      expect(cursor, SystemMouseCursors.text);
+    });
+
+    testWidgets('Shift+click under mouse reporting opens a bare URL too', (
+      tester,
+    ) async {
+      if (!hasNativeTerminal) {
+        return;
+      }
+
+      final controller = _RecordingTerminalController();
+      addTearDown(controller.dispose);
+
+      // What the bypass is still for now that explicit links open on their
+      // own: reaching a match the program never marked up.
+      final opened = await clickLinkUnderMouseReporting(
+        tester,
+        controller,
+        holdShift: true,
+        output: 'see https://example.com/docs for more',
+        col: 6,
+      );
+
+      expect(opened, 'https://example.com/docs');
+    });
+
+    testWidgets('Shift+click under mouse reporting opens the link as well', (
       tester,
     ) async {
       if (!hasNativeTerminal) {
@@ -4528,9 +4748,13 @@ void main() {
 
 Future<TestGesture> _startMouseGesture(
   WidgetTester tester,
-  Offset offset,
-) async {
-  final gesture = await tester.createGesture(kind: ui.PointerDeviceKind.mouse);
+  Offset offset, {
+  int buttons = kPrimaryButton,
+}) async {
+  final gesture = await tester.createGesture(
+    kind: ui.PointerDeviceKind.mouse,
+    buttons: buttons,
+  );
   await gesture.down(offset);
   return gesture;
 }

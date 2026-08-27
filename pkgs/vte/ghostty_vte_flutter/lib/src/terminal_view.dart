@@ -531,13 +531,15 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
   int _pendingSerialTapCount = 0;
   PointerDeviceKind _lastPointerKind = PointerDeviceKind.mouse;
 
-  /// The OSC 8 URI a touch tap landed on, held from the lift that suppressed
-  /// its forwarded click until [_handleTapUp] opens it.
+  /// The OSC 8 URI the pointer now down landed on, held from the press that
+  /// suppressed its forwarded click until [_handleTapUp] opens it.
   ///
-  /// Carries the URI rather than a flag so the open uses the cell the finger
+  /// Armed for mouse and touch alike — see [_armTapHyperlink].
+  ///
+  /// Carries the URI rather than a flag so the open uses the cell the pointer
   /// LANDED on: a tap may drift within `kTouchSlop`, and re-resolving against
   /// the release point can miss the link by a cell.
-  String? _touchTapHyperlinkUri;
+  String? _tapHyperlinkUri;
 
   /// Whether the pointer now down was pressed with the mouse-reporting bypass
   /// modifier held, so it drives this widget instead of the program.
@@ -1104,6 +1106,60 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
       selection,
       options: widget.copyOptions,
     );
+  }
+
+  /// The URI of an *explicit* OSC 8 link under [localPosition], or null.
+  ///
+  /// Deliberately excludes the bare-URL match [_resolveHyperlinkUriAt] falls
+  /// back to: every caller uses this to decide whether to take a click away
+  /// from a program that has the mouse, and a regex guess about visible text
+  /// is not grounds for that.
+  String? _explicitHyperlinkAt(
+    Offset localPosition,
+    Size size,
+    _TerminalMetrics metrics,
+  ) {
+    final cell = _positionForOffset(localPosition, size, metrics);
+    if (cell == null) {
+      return null;
+    }
+    return widget.controller.hyperlinkUriAt(cell);
+  }
+
+  /// Arms [_tapHyperlinkUri] when a primary press lands on an explicit OSC 8
+  /// link the program has the mouse for, so [_handleTapUp] opens it and
+  /// [_sendMouseEvent] withholds the whole click.
+  ///
+  /// OSC 8 is the program declaring these exact cells ARE a link, which is a
+  /// more specific statement of intent than its claim on the mouse — so the
+  /// collision is confined to programs contradicting their own markup. Without
+  /// this a link under a full-screen agent is reachable only by a Shift chord
+  /// that nothing on screen discloses, while the cell still paints as a link.
+  ///
+  /// The whole gesture goes, not just the click: a drag off a link cell sends
+  /// the program nothing rather than a release it has no press for. Same trade
+  /// the Shift bypass already makes, and drag-select is unavailable under mouse
+  /// reporting either way, so nothing reachable is lost.
+  void _armTapHyperlink(
+    PointerDownEvent event,
+    Size size,
+    _TerminalMetrics metrics,
+  ) {
+    _tapHyperlinkUri = null;
+    // Shift already routes the whole gesture here, drag-select included;
+    // arming on top of it would turn that drag into a click.
+    if (_lastPointerBypassedTerminalMouse) {
+      return;
+    }
+    if (!_terminalMouseReportingCapturesPointerKind(event.kind)) {
+      return;
+    }
+    // Primary only: a program that has the mouse still owns its right- and
+    // middle-click menus, on a link cell as much as anywhere else.
+    if (event.buttons != kPrimaryButton) {
+      return;
+    }
+    _tapHyperlinkUri = _explicitHyperlinkAt(event.localPosition, size, metrics);
   }
 
   String? _resolveHyperlinkUriAt(GhosttyTerminalCellPosition position) {
@@ -2052,11 +2108,11 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
     if (!_terminalMouseReportingCapturesPointerKind(event.kind)) {
       return;
     }
-    // Suppress the whole press-motion-release span of a bypassed gesture, so
-    // the program is never handed half of a click. Bare hover carries no
-    // button and is not part of that span, so motion tracking survives a
-    // bypassed click.
-    if (_lastPointerBypassedTerminalMouse &&
+    // Suppress the whole press-motion-release span of a gesture this widget
+    // has taken — bypassed, or landed on an explicit link — so the program is
+    // never handed half of a click. Bare hover carries no button and is not
+    // part of that span, so motion tracking survives either.
+    if ((_lastPointerBypassedTerminalMouse || _tapHyperlinkUri != null) &&
         (action == GhosttyMouseAction.GHOSTTY_MOUSE_ACTION_PRESS ||
             action == GhosttyMouseAction.GHOSTTY_MOUSE_ACTION_RELEASE ||
             event.buttons != 0)) {
@@ -2674,7 +2730,7 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
     // Cleared ahead of the guards: a tap whose gesture never reached
     // `_handleTapUp` (it lost the arena) would otherwise leave its URI armed
     // for whatever the next tap turns out to be.
-    _touchTapHyperlinkUri = null;
+    _tapHyperlinkUri = null;
     if (!_terminalMouseReportingCapturesPointerKind(PointerDeviceKind.touch)) {
       return;
     }
@@ -2753,19 +2809,13 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
         !_terminalMouseReportingCapturesPointerKind(PointerDeviceKind.touch)) {
       return;
     }
-    // An OSC 8 link is the program declaring these exact cells ARE a link,
-    // which is a more specific statement of intent than holding the mouse — and
-    // on touch there is no modifier to bypass with, so without this a link
-    // under a full-screen agent is unreachable. Explicit markup only: the
-    // bare-URL match is a guess about visible text, and stealing a TUI's clicks
-    // on a guess is a hole nobody can explain.
-    final downCell = _positionForOffset(downPosition, size, metrics);
-    if (downCell != null) {
-      final uri = widget.controller.hyperlinkUriAt(downCell);
-      if (uri != null) {
-        _touchTapHyperlinkUri = uri;
-        return;
-      }
+    // Same trade as [_armTapHyperlink], one gesture later: touch cannot decide
+    // this at press, because until the finger lifts the gesture may still turn
+    // out to be a scroll or a long-press selection.
+    final uri = _explicitHyperlinkAt(downPosition, size, metrics);
+    if (uri != null) {
+      _tapHyperlinkUri = uri;
+      return;
     }
     // Deferred click: press + release at the down cell (where the finger
     // landed), not the release cell — a tap may drift within `kTouchSlop`.
@@ -2812,8 +2862,8 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
   void _handleTapUp(Offset localPosition, Size size, _TerminalMetrics metrics) {
     widget.onTapTerminal?.call();
     _requestTerminalFocus();
-    if (_touchTapHyperlinkUri case final uri?) {
-      _touchTapHyperlinkUri = null;
+    if (_tapHyperlinkUri case final uri?) {
+      _tapHyperlinkUri = null;
       unawaited(_openHyperlink(uri));
       return;
     }
@@ -3281,11 +3331,15 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
               }
             },
             onHover: (event) {
-              // Under mouse reporting the affordance follows the bypass, or
-              // Shift+click would be an invisible shortcut: no cursor change,
+              // Under mouse reporting the affordance has to track what a click
+              // would actually do, or it lies: an explicit OSC 8 cell opens on
+              // a plain click, everything else only under the Shift bypass —
+              // which without this would be a shortcut with no cursor change,
               // no underline, nothing saying a link is reachable at all.
               if (!_terminalMouseReportingEnabled ||
-                  HardwareKeyboard.instance.isShiftPressed) {
+                  HardwareKeyboard.instance.isShiftPressed ||
+                  _explicitHyperlinkAt(event.localPosition, size, metrics) !=
+                      null) {
                 _updateHoveredHyperlink(event.localPosition, size, metrics);
               } else if (ghosttyTerminalClearHoveredLink<
                 GhosttyTerminalSelection
@@ -3320,6 +3374,8 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
                   // the gesture to a pinch, which resets whatever they tracked.
                   _pinchZoomPointerDown(event);
                 } else {
+                  // Before the PRESS: arming is what suppresses it.
+                  _armTapHyperlink(event, size, metrics);
                   _sendMouseEvent(
                     GhosttyMouseAction.GHOSTTY_MOUSE_ACTION_PRESS,
                     event,
