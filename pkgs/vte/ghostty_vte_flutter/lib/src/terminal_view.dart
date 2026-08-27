@@ -215,6 +215,7 @@ class GhosttyTerminalView extends StatefulWidget {
     this.onCopySelection,
     this.onPasteRequest,
     this.onOpenHyperlink,
+    this.onHyperlinkHover,
     this.onCellMetricsChanged,
     this.onZoomUpdate,
     this.onZoomEnd,
@@ -418,6 +419,19 @@ class GhosttyTerminalView extends StatefulWidget {
 
   /// Callback used when the user activates a hyperlink inside the terminal.
   final Future<void> Function(String uri)? onOpenHyperlink;
+
+  /// Reports the URI under the pointer, or null when it leaves every link.
+  ///
+  /// Fires only on a real change, so a host may rebuild on it freely — moving
+  /// within one link is silent. This is the only way to show a destination
+  /// before it is opened: OSC 8 lets a link's text disagree with its target,
+  /// and the view itself paints the underline but never the URI.
+  ///
+  /// Deliberately not fired from `dispose`: a host that rebuilt on it there
+  /// would be setting state while the tree is being torn down. A controller
+  /// swap does fire (through the session reset), which is the case that would
+  /// otherwise strand a stale preview.
+  final ValueChanged<String?>? onHyperlinkHover;
 
   /// Reports the exact (unrounded) cell metrics — character advance width and
   /// line height in logical pixels — whenever they are recomputed. Hosts use
@@ -629,6 +643,42 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
 
   GhosttyTerminalSelection? get _selection => _selectionSession.selection;
   String? get _hoveredHyperlink => _selectionSession.hoveredHyperlink;
+
+  /// Last value handed to [GhosttyTerminalView.onHyperlinkHover].
+  ///
+  /// The session already dedupes its own state, but the notify sites are
+  /// several and a controller swap resets the session behind them — so the
+  /// latch is what keeps "fires only on a real change" true from the host's
+  /// side rather than each caller's.
+  String? _reportedHoverUri;
+
+  /// Reports a hover change to the host, at most once per distinct URI.
+  ///
+  /// [afterFrame] is required from `didUpdateWidget`, which runs mid-build: a
+  /// host that rebuilds on this callback would otherwise be setting state
+  /// during build. Pointer-driven changes are already outside that phase.
+  void _notifyHoverChanged({bool afterFrame = false}) {
+    final uri = _hoveredHyperlink;
+    if (uri == _reportedHoverUri) {
+      return;
+    }
+    _reportedHoverUri = uri;
+    final callback = widget.onHyperlinkHover;
+    if (callback == null) {
+      return;
+    }
+    if (!afterFrame) {
+      callback(uri);
+      return;
+    }
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) {
+        return;
+      }
+      callback(uri);
+    });
+  }
+
   int? get _lineSelectionAnchorRow => _selectionSession.lineSelectionAnchorRow;
 
   void _recordSerialTapDown(SerialTapDownDetails details) {
@@ -812,6 +862,9 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
       _selectionHandleDragEdge = null;
       _lastSelectionHandleDragPosition = null;
       _selectionSession.reset();
+      // The pointer has not moved, but what is under it belongs to a terminal
+      // that is gone — leaving a host's preview showing the old link.
+      _notifyHoverChanged(afterFrame: true);
       _autoScrollSession.reset();
     }
     if (oldWidget.focusNode != widget.focusNode) {
@@ -2324,7 +2377,18 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
     bool clampToViewport = false,
   }) {
     final viewport = _viewportFor(size, metrics);
-    if (widget.controller.snapshot.lines.isEmpty) {
+    // `_scrollableLineCount`, never `snapshot`: reading the snapshot settles the
+    // formatter, which is three full-buffer passes plus a re-parse of the styled
+    // output — ~19ms on a 1800-line scrollback, measured. Under
+    // `GhosttyTerminalRendererMode.renderState` the painter never reads it, so
+    // nothing else pays that cost and asking here put it on every hover and
+    // every selection-drag motion over a terminal that is still producing
+    // output. The engine's own row total answers the same question for free,
+    // and falls back to the snapshot only where there is no engine geometry to
+    // ask (web, and before the terminal exists) — where the formatter is what
+    // renders anyway.
+    final lineCount = _scrollableLineCount();
+    if (lineCount <= 0) {
       return null;
     }
 
@@ -2349,7 +2413,7 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
         : localPosition.dy;
     final lineIndex = ((resolvedY - viewport.contentTop) / metrics.linePixels)
         .floor();
-    final maxRow = math.max(0, _scrollableLineCount() - 1);
+    final maxRow = math.max(0, lineCount - 1);
     final row = (viewport.startLine + lineIndex).clamp(0, maxRow).toInt();
     final col = ((resolvedX - effPadding.left) / metrics.charWidth).floor();
     final maxCol = math.max(0, widget.controller.cols - 1);
@@ -2536,6 +2600,7 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
       return;
     }
     setState(() {});
+    _notifyHoverChanged();
   }
 
   Future<void> _openHyperlink(String uri) async {
@@ -3328,6 +3393,7 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
                 session: _selectionSession,
               )) {
                 setState(() {});
+                _notifyHoverChanged();
               }
             },
             onHover: (event) {
@@ -3345,6 +3411,7 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
                 GhosttyTerminalSelection
               >(session: _selectionSession)) {
                 setState(() {});
+                _notifyHoverChanged();
               }
               _sendMouseEvent(
                 GhosttyMouseAction.GHOSTTY_MOUSE_ACTION_MOTION,

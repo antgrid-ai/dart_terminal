@@ -2519,6 +2519,196 @@ void main() {
       expect(cursor, SystemMouseCursors.text);
     });
 
+    // The cursor says "a link is here"; only the host can say where it goes.
+    testWidgets('onHyperlinkHover reports entering and leaving a link', (
+      tester,
+    ) async {
+      if (!hasNativeTerminal) {
+        return;
+      }
+
+      final controller = _RecordingTerminalController();
+      addTearDown(controller.dispose);
+      controller.terminal.setMode(VtModes.normalMouse, true);
+      controller.terminal.setMode(VtModes.sgrMouse, true);
+
+      final reported = <String?>[];
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: SizedBox(
+              width: 600,
+              height: 400,
+              child: GhosttyTerminalView(
+                controller: controller,
+                autofocus: true,
+                showHeader: false,
+                onHyperlinkHover: reported.add,
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      const uri = 'https://github.com/antgrid-ai/antgrid/pull/13';
+      // Two leading spaces, so column 0 is outside the linked cells.
+      controller.appendDebugOutput(
+        '  \x1B]8;;$uri\x07antgrid-ai/antgrid#13\x1B]8;;\x07',
+      );
+      await tester.pumpAndSettle();
+
+      final (:charWidth, :linePixels, :padding) = _measureTestMetrics();
+      Offset at(int col) => Offset(
+        (padding + (col * charWidth) + (charWidth ~/ 2)).toDouble(),
+        (padding + (linePixels ~/ 2)).toDouble(),
+      );
+
+      final gesture = await tester.createGesture(
+        kind: ui.PointerDeviceKind.mouse,
+      );
+      await gesture.addPointer(location: Offset.zero);
+      addTearDown(gesture.removePointer);
+      await tester.pump();
+
+      await gesture.moveTo(at(4));
+      await tester.pumpAndSettle();
+      expect(reported, [uri]);
+
+      // Still inside the same link: a host may rebuild on this callback, so
+      // moving across it must stay silent.
+      await gesture.moveTo(at(6));
+      await tester.pumpAndSettle();
+      expect(reported, [uri]);
+
+      await gesture.moveTo(at(0));
+      await tester.pumpAndSettle();
+      expect(reported, [uri, null]);
+    });
+
+    testWidgets('onHyperlinkHover reports null when the pointer leaves', (
+      tester,
+    ) async {
+      if (!hasNativeTerminal) {
+        return;
+      }
+
+      final controller = _RecordingTerminalController();
+      addTearDown(controller.dispose);
+
+      final reported = <String?>[];
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: Column(
+              children: [
+                SizedBox(
+                  width: 600,
+                  height: 200,
+                  child: GhosttyTerminalView(
+                    controller: controller,
+                    autofocus: true,
+                    showHeader: false,
+                    onHyperlinkHover: reported.add,
+                  ),
+                ),
+                const SizedBox(width: 600, height: 200),
+              ],
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      const uri = 'https://github.com/antgrid-ai/antgrid/pull/13';
+      controller.appendDebugOutput(
+        '\x1B]8;;$uri\x07antgrid-ai/antgrid#13\x1B]8;;\x07',
+      );
+      await tester.pumpAndSettle();
+
+      final (:charWidth, :linePixels, :padding) = _measureTestMetrics();
+      final gesture = await tester.createGesture(
+        kind: ui.PointerDeviceKind.mouse,
+      );
+      await gesture.addPointer(location: Offset.zero);
+      addTearDown(gesture.removePointer);
+      await tester.pump();
+
+      await gesture.moveTo(
+        Offset(
+          (padding + (5 * charWidth) + (charWidth ~/ 2)).toDouble(),
+          (padding + (linePixels ~/ 2)).toDouble(),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(reported, [uri]);
+
+      // Out of the view entirely, into the sibling below it.
+      await gesture.moveTo(const Offset(300, 300));
+      await tester.pumpAndSettle();
+      expect(reported, [uri, null]);
+    });
+
+    testWidgets('onHyperlinkHover clears when the controller is swapped', (
+      tester,
+    ) async {
+      if (!hasNativeTerminal) {
+        return;
+      }
+
+      final first = _RecordingTerminalController();
+      addTearDown(first.dispose);
+      final second = _RecordingTerminalController();
+      addTearDown(second.dispose);
+
+      final reported = <String?>[];
+      Widget build(GhosttyTerminalController controller) => MaterialApp(
+        home: Scaffold(
+          body: SizedBox(
+            width: 600,
+            height: 400,
+            child: GhosttyTerminalView(
+              controller: controller,
+              autofocus: true,
+              showHeader: false,
+              onHyperlinkHover: reported.add,
+            ),
+          ),
+        ),
+      );
+
+      await tester.pumpWidget(build(first));
+      await tester.pumpAndSettle();
+
+      const uri = 'https://github.com/antgrid-ai/antgrid/pull/13';
+      first.appendDebugOutput(
+        '\x1B]8;;$uri\x07antgrid-ai/antgrid#13\x1B]8;;\x07',
+      );
+      await tester.pumpAndSettle();
+
+      final (:charWidth, :linePixels, :padding) = _measureTestMetrics();
+      final gesture = await tester.createGesture(
+        kind: ui.PointerDeviceKind.mouse,
+      );
+      await gesture.addPointer(location: Offset.zero);
+      addTearDown(gesture.removePointer);
+      await tester.pump();
+      await gesture.moveTo(
+        Offset(
+          (padding + (5 * charWidth) + (charWidth ~/ 2)).toDouble(),
+          (padding + (linePixels ~/ 2)).toDouble(),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(reported, [uri]);
+
+      // The pointer never moves: without the swap reporting for itself, the
+      // host is left showing a link from a terminal that is gone.
+      await tester.pumpWidget(build(second));
+      await tester.pumpAndSettle();
+      expect(reported, [uri, null]);
+    });
+
     testWidgets('Shift+click under mouse reporting opens a bare URL too', (
       tester,
     ) async {
