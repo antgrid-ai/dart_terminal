@@ -2377,7 +2377,18 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
     bool clampToViewport = false,
   }) {
     final viewport = _viewportFor(size, metrics);
-    if (widget.controller.snapshot.lines.isEmpty) {
+    // `_scrollableLineCount`, never `snapshot`: reading the snapshot settles the
+    // formatter, which is three full-buffer passes plus a re-parse of the styled
+    // output — ~19ms on a 1800-line scrollback, measured. Under
+    // `GhosttyTerminalRendererMode.renderState` the painter never reads it, so
+    // nothing else pays that cost and asking here put it on every hover and
+    // every selection-drag motion over a terminal that is still producing
+    // output. The engine's own row total answers the same question for free,
+    // and falls back to the snapshot only where there is no engine geometry to
+    // ask (web, and before the terminal exists) — where the formatter is what
+    // renders anyway.
+    final lineCount = _scrollableLineCount();
+    if (lineCount <= 0) {
       return null;
     }
 
@@ -2402,7 +2413,7 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
         : localPosition.dy;
     final lineIndex = ((resolvedY - viewport.contentTop) / metrics.linePixels)
         .floor();
-    final maxRow = math.max(0, _scrollableLineCount() - 1);
+    final maxRow = math.max(0, lineCount - 1);
     final row = (viewport.startLine + lineIndex).clamp(0, maxRow).toInt();
     final col = ((resolvedX - effPadding.left) / metrics.charWidth).floor();
     final maxCol = math.max(0, widget.controller.cols - 1);
