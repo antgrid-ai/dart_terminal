@@ -1799,6 +1799,92 @@ void main() {
       expect(currentContent?.text, isNot('Line 0'));
     });
 
+    testWidgets('a trackpad two-finger scroll drives a program holding the '
+        'mouse', (tester) async {
+      if (!hasNativeTerminal) {
+        return;
+      }
+
+      final recording = _RecordingTerminalController();
+      addTearDown(recording.dispose);
+      recording.appendDebugOutput(
+        List<String>.generate(120, (index) => 'Line $index').join('\r\n'),
+      );
+      recording.terminal.setMode(VtModes.normalMouse, true);
+      recording.terminal.setMode(VtModes.sgrMouse, true);
+
+      await tester.pumpWidget(
+        buildView(
+          terminalController: recording,
+          showHeader: false,
+          autofocus: true,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final metrics = _measureTestMetrics();
+      final pointer = TestPointer(1, PointerDeviceKind.trackpad);
+      await tester.sendEventToBinding(
+        pointer.panZoomStart(const Offset(200, 200)),
+      );
+      await tester.pump();
+      for (var step = 1; step <= 4; step++) {
+        await tester.sendEventToBinding(
+          pointer.panZoomUpdate(
+            const Offset(200, 200),
+            pan: Offset(0, step * metrics.linePixels.toDouble()),
+          ),
+        );
+        await tester.pump();
+      }
+      await tester.sendEventToBinding(pointer.panZoomEnd());
+      await tester.pumpAndSettle();
+
+      expect(
+        recording.mouseEvents.map((event) => event.button),
+        contains(GhosttyMouseButton.GHOSTTY_MOUSE_BUTTON_FOUR),
+      );
+    });
+
+    testWidgets('wheel deltas smaller than a line still scroll', (
+      tester,
+    ) async {
+      if (!hasNativeTerminal) {
+        return;
+      }
+
+      final scrollController = ScrollController();
+      addTearDown(scrollController.dispose);
+      controller.appendDebugOutput(
+        List<String>.generate(120, (index) => 'Line $index').join('\r\n'),
+      );
+
+      await tester.pumpWidget(
+        buildView(
+          showHeader: false,
+          autofocus: true,
+          scrollController: scrollController,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      scrollController.jumpTo(150);
+      await tester.pumpAndSettle();
+      final before = scrollController.offset;
+
+      final metrics = _measureTestMetrics();
+      final subLine = metrics.linePixels / 4;
+      final pointer = TestPointer(1, PointerDeviceKind.mouse);
+      await tester.sendEventToBinding(pointer.hover(const Offset(200, 200)));
+      for (var step = 0; step < 8; step++) {
+        await tester.sendEventToBinding(pointer.scroll(Offset(0, -subLine)));
+        await tester.pump();
+      }
+      await tester.pumpAndSettle();
+
+      expect(scrollController.offset, isNot(before));
+    });
+
     testWidgets(
       'new terminal activity snaps the viewport back to the live bottom when enabled',
       (tester) async {
