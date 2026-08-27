@@ -468,6 +468,12 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
   /// here and only emit a `_setScrollOffsetLines` change once the threshold
   /// crosses a full line, carrying the remainder into the next update.
   double _panZoomScrollAccumPx = 0;
+
+  /// Same accumulator for the wheel. A precision touchpad reports scroll as
+  /// many small `PointerScrollEvent`s — several pixels each, well under a
+  /// line — so rounding per event and dropping the remainder discards the
+  /// whole gesture and the transcript never moves.
+  double _wheelScrollAccumPx = 0;
   int _lastReportedCols = -1;
   int _lastReportedRows = -1;
 
@@ -1894,10 +1900,12 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
       return;
     }
 
-    final deltaLines = (event.scrollDelta.dy / metrics.linePixels).round();
+    _wheelScrollAccumPx += event.scrollDelta.dy;
+    final deltaLines = (_wheelScrollAccumPx / metrics.linePixels).truncate();
     if (deltaLines == 0) {
       return;
     }
+    _wheelScrollAccumPx -= deltaLines * metrics.linePixels;
 
     _setScrollOffsetLines(_scrollOffsetLines - deltaLines, size, metrics);
   }
@@ -1943,10 +1951,11 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
   /// fingers (fingers down = scroll toward live bottom = offset decreases;
   /// fingers up = scroll back into history = offset increases).
   ///
-  /// Mouse-reporting forwarding is intentionally skipped: SGR/xterm mouse
-  /// protocol has no pan-zoom encoding (only wheel buttons 4/5 / 6/7), so
-  /// pan-zoom is silently dropped when the TUI has mouse reporting on. This
-  /// matches iTerm2 / Terminal.app behavior.
+  /// Under mouse reporting the pan is forwarded as wheel steps. The SGR/xterm
+  /// mouse protocol has no pan-zoom encoding, but one button-4/5 press per
+  /// line crossed is what every terminal that supports both does — and
+  /// dropping the gesture instead leaves a laptop with no way to scroll at
+  /// all under a full-screen agent, which holds the mouse for its whole run.
   void _handlePointerPanZoomUpdate(
     PointerPanZoomUpdateEvent event,
     Size size,
@@ -1966,11 +1975,18 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
       widget.onZoomUpdate!(event.scale);
       return;
     }
-    if (_terminalMouseReportingEnabled) return;
     _panZoomScrollAccumPx += event.panDelta.dy;
     final deltaLines = (_panZoomScrollAccumPx / metrics.linePixels).truncate();
     if (deltaLines == 0) return;
     _panZoomScrollAccumPx -= deltaLines * metrics.linePixels;
+    if (_terminalMouseReportingEnabled) {
+      // Positive pan means the fingers moved down, which walks back into
+      // history — the same direction a wheel-up notch goes.
+      for (var step = 0; step < deltaLines.abs(); step++) {
+        _sendWheelStep(event, size, metrics, up: deltaLines > 0);
+      }
+      return;
+    }
     _setScrollOffsetLines(_scrollOffsetLines + deltaLines, size, metrics);
   }
 
