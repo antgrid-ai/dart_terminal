@@ -184,6 +184,47 @@ void main() {
     );
   });
 
+  test('resize preserves the terminal viewport position', () {
+    if (!hasNativeTerminal) {
+      return;
+    }
+
+    final controller = GhosttyTerminalController(
+      initialCols: 20,
+      initialRows: 6,
+    );
+    addTearDown(controller.dispose);
+
+    final buffer = StringBuffer();
+    for (var i = 0; i < 80; i++) {
+      buffer.write('line$i\r\n');
+    }
+    controller.appendDebugOutput(buffer.toString());
+
+    controller.scrollViewportToTop();
+    expect(
+      controller.renderSnapshot!.rowsData.first.cells.map((c) => c.text).join(),
+      startsWith('line0'),
+    );
+    controller.resize(cols: 30, rows: 8);
+    expect(controller.viewportScrollbar!.offset, 0);
+    expect(
+      controller.renderSnapshot!.rowsData.first.cells.map((c) => c.text).join(),
+      startsWith('line0'),
+    );
+
+    controller.scrollViewportToBottom();
+    controller.resize(cols: 16, rows: 4);
+    expect(controller.isViewportAtBottom, isTrue);
+    final bottom = controller.renderSnapshot!;
+    expect(
+      bottom.rowsData.any(
+        (row) => row.cells.map((cell) => cell.text).join().contains('line79'),
+      ),
+      isTrue,
+    );
+  });
+
   test('write/sendKey return false when process is not running', () {
     final controller = GhosttyTerminalController();
     addTearDown(controller.dispose);
