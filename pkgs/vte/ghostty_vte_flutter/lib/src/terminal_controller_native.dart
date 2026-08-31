@@ -827,9 +827,7 @@ class GhosttyTerminalController extends ChangeNotifier
       if (wasAtBottom) {
         terminal.scrollToBottom();
       } else {
-        terminal.scrollViewport(
-          VtTerminalScrollViewport.row(before.offset),
-        );
+        terminal.scrollViewport(VtTerminalScrollViewport.row(before.offset));
       }
       _syncFollowingFromScrollbar(terminal);
       _ptySession?.resize(rows: checkedRows, cols: checkedCols);
