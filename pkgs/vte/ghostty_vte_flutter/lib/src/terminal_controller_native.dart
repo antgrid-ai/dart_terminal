@@ -364,6 +364,23 @@ class GhosttyTerminalController extends ChangeNotifier
     _markDirty();
   }
 
+  /// Scrolls the viewport so [row] is the first visible row after a resize.
+  ///
+  /// Ghostty's resize can remap the viewport. Keeping the absolute row makes
+  /// a deliberate history position survive a grid change instead of jumping
+  /// to the beginning of the retained transcript.
+  void scrollViewportToRow(int row) {
+    final terminal = _terminal;
+    if (terminal == null) {
+      _viewportFollowingBottom = false;
+      return;
+    }
+    terminal.scrollViewport(VtTerminalScrollViewport.row(math.max(0, row)));
+    _syncFollowingFromScrollbar(terminal);
+    _refreshRenderStateOnly();
+    _markDirty();
+  }
+
   /// Recomputes [_viewportFollowingBottom] from the engine scrollbar after a
   /// manual scroll. The viewport is "at bottom" when its bottom edge
   /// (`offset + length`) reaches the total scrollable height.
@@ -799,12 +816,20 @@ class GhosttyTerminalController extends ChangeNotifier
 
     final terminal = _terminal;
     if (terminal != null) {
+      final before = terminal.scrollbar;
+      final wasAtBottom = _viewportFollowingBottom;
       terminal.resize(
         cols: checkedCols,
         rows: checkedRows,
         cellWidthPx: cellWidthPx,
         cellHeightPx: cellHeightPx,
       );
+      if (wasAtBottom) {
+        terminal.scrollToBottom();
+      } else {
+        terminal.scrollViewport(VtTerminalScrollViewport.row(before.offset));
+      }
+      _syncFollowingFromScrollbar(terminal);
       _ptySession?.resize(rows: checkedRows, cols: checkedCols);
       _externalResize?.call(
         checkedCols,

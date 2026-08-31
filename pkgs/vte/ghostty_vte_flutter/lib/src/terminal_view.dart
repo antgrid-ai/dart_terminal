@@ -947,6 +947,7 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
     if (!mounted) {
       return;
     }
+    _syncScrollOffsetFromEngine();
     if (_selection != null) {
       ghosttyTerminalNotifySelectionContent<GhosttyTerminalSelection>(
         selection: _selection,
@@ -958,6 +959,37 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
       _jumpToLiveBottom();
     }
     setState(() {});
+  }
+
+  /// Keeps the Flutter scroll layer aligned with Ghostty after operations
+  /// that remap the native transcript, especially a grid resize. The native
+  /// scrollbar is authoritative because column changes can reflow rows and
+  /// alter the offset-from-bottom even when the user did not scroll.
+  void _syncScrollOffsetFromEngine() {
+    final bar = widget.controller.viewportScrollbar;
+    if (bar == null) {
+      return;
+    }
+    final next = math.max(0, bar.total - bar.length - bar.offset);
+    if (next == _scrollOffsetLines) {
+      return;
+    }
+    _scrollOffsetLines = next;
+    if (!_scrollController.hasClients || _lastMeasuredLinePixels <= 0) {
+      return;
+    }
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_scrollController.hasClients) {
+        return;
+      }
+      final clamped = (next * _lastMeasuredLinePixels).clamp(
+        0.0,
+        _scrollController.position.maxScrollExtent,
+      );
+      if ((_scrollController.offset - clamped).abs() >= 0.5) {
+        _scrollController.jumpTo(clamped);
+      }
+    });
   }
 
   void _onScrollControllerChanged() {

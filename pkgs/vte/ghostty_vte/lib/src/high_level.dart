@@ -2110,7 +2110,7 @@ final class VtMouseEncoderOptions {
 
 /// Scroll viewport behavior for [VtTerminal.scrollViewport].
 final class VtTerminalScrollViewport {
-  const VtTerminalScrollViewport._(this._tag, {this.delta = 0});
+  const VtTerminalScrollViewport._(this._tag, {this.delta = 0, this.row = 0});
 
   /// Scroll to the top of the scrollback.
   const VtTerminalScrollViewport.top()
@@ -2133,8 +2133,18 @@ final class VtTerminalScrollViewport {
         delta: delta,
       );
 
+  /// Scrolls so absolute row [row] becomes the first visible row.
+  ///
+  /// Row zero is the oldest row currently retained in the scrollback.
+  const VtTerminalScrollViewport.row(int row)
+    : this._(
+        bindings.GhosttyTerminalScrollViewportTag.GHOSTTY_SCROLL_VIEWPORT_ROW,
+        row: row,
+      );
+
   final bindings.GhosttyTerminalScrollViewportTag _tag;
   final int delta;
+  final int row;
 }
 
 /// Extra screen state to include in styled formatter output.
@@ -3318,6 +3328,11 @@ final class VtTerminal {
               .GhosttyTerminalScrollViewportTag
               .GHOSTTY_SCROLL_VIEWPORT_DELTA) {
         behaviorPtr.ref.value.delta = behavior.delta;
+      } else if (behavior._tag ==
+          bindings
+              .GhosttyTerminalScrollViewportTag
+              .GHOSTTY_SCROLL_VIEWPORT_ROW) {
+        behaviorPtr.ref.value.row = behavior.row;
       }
       bindings.ghostty_terminal_scroll_viewport(_handle, behaviorPtr.ref);
     } finally {
