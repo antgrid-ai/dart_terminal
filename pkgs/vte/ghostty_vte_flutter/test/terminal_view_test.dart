@@ -1689,7 +1689,8 @@ void main() {
       await tester.tapAt(firstRowTarget);
       await tester.pumpAndSettle();
 
-      expect(currentContent?.text, 'Line 0');
+      expect(currentContent, isNotNull);
+      final liveBottomRowText = currentContent?.text;
 
       final scrollbar = await tester.startGesture(const Offset(595, 48));
       await scrollbar.moveTo(const Offset(595, 320));
@@ -1704,7 +1705,7 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(currentContent, isNotNull);
-      expect(currentContent?.text, isNot('Line 0'));
+      expect(currentContent?.text, isNot(liveBottomRowText));
     });
 
     testWidgets(
@@ -1783,7 +1784,8 @@ void main() {
       await tester.pump(const Duration(milliseconds: 40));
       await tester.tapAt(firstRowTarget);
       await tester.pumpAndSettle();
-      expect(currentContent?.text, 'Line 0');
+      expect(currentContent, isNotNull);
+      final liveBottomRowText = currentContent?.text;
 
       scrollController.jumpTo(300);
       await tester.pumpAndSettle();
@@ -1796,7 +1798,78 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(currentContent, isNotNull);
-      expect(currentContent?.text, isNot('Line 0'));
+      expect(currentContent?.text, isNot(liveBottomRowText));
+    });
+
+    testWidgets('completed desktop triple-click does not keep auto-scrolling', (
+      tester,
+    ) async {
+      if (!hasNativeTerminal) {
+        return;
+      }
+
+      final scrollController = ScrollController();
+      addTearDown(scrollController.dispose);
+      controller.appendDebugOutput(
+        List<String>.generate(120, (index) => 'Line $index').join('\r\n'),
+      );
+
+      await tester.pumpWidget(
+        buildView(
+          showHeader: false,
+          autofocus: true,
+          scrollController: scrollController,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      scrollController.jumpTo(300);
+      await tester.pumpAndSettle();
+      final before = controller.viewportScrollbar!;
+      final beforeOffsetFromBottom =
+          before.total - before.length - before.offset;
+
+      const firstRowTarget = Offset(30, 24);
+      await tester.tapAt(firstRowTarget);
+      await tester.pump(const Duration(milliseconds: 40));
+      await tester.tapAt(firstRowTarget);
+      await tester.pump(const Duration(milliseconds: 40));
+      await tester.tapAt(firstRowTarget);
+      await tester.pumpAndSettle();
+
+      final after = controller.viewportScrollbar!;
+      expect(after.total - after.length - after.offset, beforeOffsetFromBottom);
+      expect(scrollController.offset, 300);
+    });
+
+    testWidgets('new output cannot overwrite a pending local viewport scroll', (
+      tester,
+    ) async {
+      if (!hasNativeTerminal) {
+        return;
+      }
+
+      final scrollController = ScrollController();
+      addTearDown(scrollController.dispose);
+      controller.appendDebugOutput(
+        List<String>.generate(120, (index) => 'Line $index').join('\r\n'),
+      );
+
+      await tester.pumpWidget(
+        buildView(showHeader: false, scrollController: scrollController),
+      );
+      await tester.pumpAndSettle();
+
+      final observedOffsets = <double>[];
+      scrollController.addListener(
+        () => observedOffsets.add(scrollController.offset),
+      );
+      scrollController.jumpTo(300);
+      controller.appendDebugOutput('\r\nTail');
+      await tester.pumpAndSettle();
+
+      expect(observedOffsets, isNot(contains(0.0)));
+      expect(scrollController.offset, 300);
     });
 
     testWidgets('a trackpad two-finger scroll drives a program holding the '
@@ -2006,8 +2079,15 @@ void main() {
         controller.appendDebugOutput('\r\nTail');
         await tester.pumpAndSettle();
 
-        // Without auto-follow the viewport stays put.
-        expect(scrollController.offset, preservedOffset);
+        // Without auto-follow the same transcript row stays visible. Since the
+        // Flutter scroll layer measures from the live bottom, its coordinate
+        // grows when a new row is appended below that held viewport.
+        final bar = controller.viewportScrollbar!;
+        final expectedOffset =
+            (bar.total - bar.length - bar.offset) *
+            _measureTestMetrics().linePixels;
+        expect(scrollController.offset, expectedOffset);
+        expect(scrollController.offset, greaterThan(preservedOffset));
 
         // The rendered first row must still show the same content as before the
         // new output arrived — the viewport did not move.
