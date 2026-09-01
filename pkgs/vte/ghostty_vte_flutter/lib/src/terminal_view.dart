@@ -489,6 +489,15 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
   /// Latest offset-from-bottom awaiting a single post-frame engine drive.
   int? _pendingEngineOffset;
 
+  /// Latest engine offset awaiting a post-frame Flutter scroll-layer sync.
+  /// A null value also cancels an already scheduled callback when a newer
+  /// local scroll takes ownership of the viewport.
+  int? _pendingFlutterOffset;
+
+  /// Prevents an engine-originated [ScrollController.jumpTo] from being sent
+  /// straight back to the engine as a new user scroll.
+  bool _isSyncingFlutterViewport = false;
+
   /// True while the view is synchronously driving the engine viewport in
   /// response to its OWN scroll. `scrollViewportToOffsetFromBottom` notifies
   /// listeners (`_markDirty`), which re-enters `_onControllerChanged`; without
@@ -852,6 +861,8 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
   void didUpdateWidget(covariant GhosttyTerminalView oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.controller != widget.controller) {
+      _pendingEngineOffset = null;
+      _pendingFlutterOffset = null;
       oldWidget.controller.removeListener(_onControllerChanged);
       widget.controller.addListener(_onControllerChanged);
       _lastReportedCols = -1;
@@ -966,6 +977,11 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
   /// scrollbar is authoritative because column changes can reflow rows and
   /// alter the offset-from-bottom even when the user did not scroll.
   void _syncScrollOffsetFromEngine() {
+    // A local scroll has already been accepted but has not reached the engine
+    // yet. Its newer intent wins over notifications emitted in the meantime.
+    if (_pendingEngineOffset != null) {
+      return;
+    }
     final bar = widget.controller.viewportScrollbar;
     if (bar == null) {
       return;
@@ -978,16 +994,28 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
     if (!_scrollController.hasClients || _lastMeasuredLinePixels <= 0) {
       return;
     }
+    final alreadyScheduled = _pendingFlutterOffset != null;
+    _pendingFlutterOffset = next;
+    if (alreadyScheduled) {
+      return;
+    }
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted || !_scrollController.hasClients) {
+      final target = _pendingFlutterOffset;
+      _pendingFlutterOffset = null;
+      if (!mounted || target == null || !_scrollController.hasClients) {
         return;
       }
-      final clamped = (next * _lastMeasuredLinePixels).clamp(
+      final clamped = (target * _lastMeasuredLinePixels).clamp(
         0.0,
         _scrollController.position.maxScrollExtent,
       );
       if ((_scrollController.offset - clamped).abs() >= 0.5) {
-        _scrollController.jumpTo(clamped);
+        _isSyncingFlutterViewport = true;
+        try {
+          _scrollController.jumpTo(clamped);
+        } finally {
+          _isSyncingFlutterViewport = false;
+        }
       }
     });
   }
@@ -995,6 +1023,11 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
   void _onScrollControllerChanged() {
     if (!mounted || _lastMeasuredLinePixels <= 0) {
       return;
+    }
+    if (!_isSyncingFlutterViewport) {
+      // Invalidate an older engine-to-Flutter callback before it can move the
+      // scroll layer back underneath this newer local scroll.
+      _pendingFlutterOffset = null;
     }
     final nextOffsetLines = (_scrollController.offset / _lastMeasuredLinePixels)
         .round();
@@ -1004,7 +1037,9 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
     setState(() {
       _scrollOffsetLines = nextOffsetLines;
     });
-    _driveEngineViewport(nextOffsetLines);
+    if (!_isSyncingFlutterViewport) {
+      _driveEngineViewport(nextOffsetLines);
+    }
   }
 
   bool _resetScrollOffsetToBottom() {
@@ -3220,6 +3255,7 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
     _TerminalMetrics metrics, {
     _TerminalSelectionGranularity granularity =
         _TerminalSelectionGranularity.line,
+    bool autoScrollWhileHeld = false,
   }) {
     // See `_beginSelection`: a slow pinch can sit inside long-press slop long
     // enough for the recognizer to fire — swallow it while the pinch is live.
@@ -3264,7 +3300,9 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
         fallbackLocalPosition: localPosition,
       );
     }
-    _syncAutoScroll(localPosition, size, metrics);
+    if (autoScrollWhileHeld) {
+      _syncAutoScroll(localPosition, size, metrics);
+    }
   }
 
   Widget _buildPointerGestureLayer({
@@ -3288,6 +3326,7 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
             size,
             metrics,
             granularity: _TerminalSelectionGranularity.visualRow,
+            autoScrollWhileHeld: true,
           );
         },
         onLongPressMoveUpdate: (details) =>
@@ -3341,6 +3380,7 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
                     size,
                     metrics,
                     granularity: _TerminalSelectionGranularity.visualRow,
+                    autoScrollWhileHeld: true,
                   );
                 } else {
                   _beginLineSelection(details.localPosition, size, metrics);
