@@ -77,6 +77,7 @@ void main() {
       GhosttyTerminalInteractionPolicy interactionPolicy =
           GhosttyTerminalInteractionPolicy.auto,
       bool showSelectionContextMenu = true,
+      VoidCallback? onScrollPastTop,
       GhosttyTerminalSelectionController? selectionController,
       GhosttyTerminalSelectionContextMenuButtonItemsBuilder?
       selectionContextMenuButtonItemsBuilder,
@@ -112,6 +113,7 @@ void main() {
               wordBoundaryPolicy: wordBoundaryPolicy,
               interactionPolicy: interactionPolicy,
               showSelectionContextMenu: showSelectionContextMenu,
+              onScrollPastTop: onScrollPastTop,
               selectionController: selectionController,
               selectionContextMenuButtonItemsBuilder:
                   selectionContextMenuButtonItemsBuilder,
@@ -2218,6 +2220,67 @@ void main() {
       expect(currentSelection, isNull);
       expect(currentContent, isNull);
     });
+
+    testWidgets(
+      'a wheel scroll clamped at the top reports it, and one that moves does not',
+      (tester) async {
+        if (!hasNativeTerminal) {
+          return;
+        }
+
+        // The hook a host needs when the engine's transcript is not the whole
+        // transcript: without it the terminal simply stops at its first line
+        // and the rest is unreachable by the gesture that should reach it.
+        var pastTop = 0;
+        // Several screens, so there is real scrollback to walk up through
+        // before the top is reached.
+        controller.appendDebugOutput(
+          List<String>.generate(120, (index) => 'Line $index').join('\r\n'),
+        );
+
+        await tester.pumpWidget(
+          buildView(
+            showHeader: false,
+            autofocus: true,
+            onScrollPastTop: () => pastTop++,
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        final metrics = _measureTestMetrics();
+        final pointer = TestPointer(1, PointerDeviceKind.mouse);
+        await tester.sendEventToBinding(pointer.hover(const Offset(200, 200)));
+
+        await tester.sendEventToBinding(
+          pointer.scroll(Offset(0, -metrics.linePixels * 3)),
+        );
+        await tester.pumpAndSettle();
+        expect(
+          pastTop,
+          0,
+          reason: 'a scroll that actually moved the transcript is not the '
+              'user asking for content this view does not hold',
+        );
+
+        // Far above the first line the engine holds.
+        for (var step = 0; step < 60; step++) {
+          await tester.sendEventToBinding(
+            pointer.scroll(Offset(0, -metrics.linePixels * 4)),
+          );
+          await tester.pump();
+        }
+        await tester.pumpAndSettle();
+        expect(pastTop, greaterThan(0));
+
+        // Scrolling back down is never a request for more history.
+        final atTop = pastTop;
+        await tester.sendEventToBinding(
+          pointer.scroll(Offset(0, metrics.linePixels * 4)),
+        );
+        await tester.pumpAndSettle();
+        expect(pastTop, atTop);
+      },
+    );
 
     testWidgets('selectionController clears a live selection', (tester) async {
       if (!hasNativeTerminal) {

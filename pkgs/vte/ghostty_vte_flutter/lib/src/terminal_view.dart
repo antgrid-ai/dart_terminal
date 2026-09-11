@@ -252,6 +252,7 @@ class GhosttyTerminalView extends StatefulWidget {
     this.onCellMetricsChanged,
     this.onZoomUpdate,
     this.onZoomEnd,
+    this.onScrollPastTop,
   });
 
   /// Session controller that owns the live VT terminal and process transport.
@@ -300,6 +301,23 @@ class GhosttyTerminalView extends StatefulWidget {
   /// by any host that replaces the screen wholesale — see
   /// [GhosttyTerminalSelectionController] for why the view cannot do it alone.
   final GhosttyTerminalSelectionController? selectionController;
+
+  /// Called when a user scroll asks to go ABOVE the first line this view
+  /// holds and is clamped there.
+  ///
+  /// The hook a host needs when the transcript in the engine is not the whole
+  /// transcript — scrollback served from somewhere else, a session restored
+  /// from a log — so the normal scroll gesture can reach it instead of the
+  /// terminal simply stopping. The view still clamps; this only reports.
+  ///
+  /// Only the three user paths fire it (wheel, trackpad pan, touch drag), and
+  /// none of them while the guest is consuming the wheel itself — a
+  /// mouse-reporting TUI owns its own scrollback and the host must not shadow
+  /// it. Programmatic scrolls and scrollbar-thumb drags never fire it.
+  ///
+  /// Fires once per clamped scroll step, so it repeats while the user keeps
+  /// scrolling at the top: hosts must be idempotent.
+  final VoidCallback? onScrollPastTop;
 
   /// Optional callback invoked when the terminal receives a tap interaction.
   final VoidCallback? onTapTerminal;
@@ -2056,7 +2074,7 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
     }
     _wheelScrollAccumPx -= deltaLines * metrics.linePixels;
 
-    _setScrollOffsetLines(_scrollOffsetLines - deltaLines, size, metrics);
+    _userScrollToOffsetLines(_scrollOffsetLines - deltaLines, size, metrics);
   }
 
   // One wheel "notch" as a mouse button 4/5 press+release at `event`'s location.
@@ -2136,7 +2154,7 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
       }
       return;
     }
-    _setScrollOffsetLines(_scrollOffsetLines + deltaLines, size, metrics);
+    _userScrollToOffsetLines(_scrollOffsetLines + deltaLines, size, metrics);
   }
 
   void _handlePointerPanZoomEnd(PointerPanZoomEndEvent event) {
@@ -2394,6 +2412,20 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
       contentHeight: math.max(0, contentHeight),
       maxVisible: maxVisible,
     );
+  }
+
+  /// [_setScrollOffsetLines] for the three USER scroll paths, which are the
+  /// only ones whose clamping means "the user wanted more transcript than
+  /// there is". A programmatic jump computes a target it already knows is in
+  /// range, and a scrollbar thumb cannot leave its own track.
+  void _userScrollToOffsetLines(
+    int offset,
+    Size size,
+    _TerminalMetrics metrics,
+  ) {
+    final pastTop = offset > _maxScrollOffset(size, metrics);
+    _setScrollOffsetLines(offset, size, metrics);
+    if (pastTop) widget.onScrollPastTop?.call();
   }
 
   void _setScrollOffsetLines(int offset, Size size, _TerminalMetrics metrics) {
@@ -2941,7 +2973,7 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
       return;
     }
 
-    _setScrollOffsetLines(_scrollOffsetLines + deltaLines, size, metrics);
+    _userScrollToOffsetLines(_scrollOffsetLines + deltaLines, size, metrics);
   }
 
   void _endTouchScroll(PointerEvent event) {
