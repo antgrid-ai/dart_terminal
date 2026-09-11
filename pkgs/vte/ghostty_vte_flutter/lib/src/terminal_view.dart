@@ -156,6 +156,38 @@ class GhosttyTerminalSoftKeyboardController {
   void toggle() => isVisible ? hide() : show();
 }
 
+/// Imperative handle to drop a [GhosttyTerminalView]'s selection from outside
+/// the view, for hosts that rewrite the screen out from under it.
+///
+/// A selection is stored as row/column anchors, never as the text it covers.
+/// That is right for a terminal the user is scrolling, and wrong for one whose
+/// screen is replaced wholesale — a serialized frame, a restored snapshot, a
+/// re-attached session — because the anchors survive the write and now point
+/// at glyphs nobody selected. The view cannot notice: to the engine such a
+/// write is ordinary output. Only the host knows, so only the host can say.
+///
+/// Attach one instance to one view via
+/// [GhosttyTerminalView.selectionController] and call [clear] on every write
+/// that replaces the screen.
+class GhosttyTerminalSelectionController {
+  VoidCallback? _clear;
+  ValueGetter<bool>? _hasSelection;
+
+  /// Whether the attached view holds a selection right now. Reads the view's
+  /// live state, so it stays correct after a tap-away the host never saw.
+  bool get hasSelection => _hasSelection?.call() ?? false;
+
+  /// Drops the attached view's selection along with everything anchored to it
+  /// — the highlight, the touch handles, the context menu — exactly as tapping
+  /// empty space would, and fires
+  /// [GhosttyTerminalView.onSelectionChanged] / [onSelectionContentChanged]
+  /// with null so a host mirroring the selected text drops its copy too.
+  ///
+  /// A no-op when there is nothing selected, so a host may call it
+  /// unconditionally on every screen replace.
+  void clear() => _clear?.call();
+}
+
 /// Painter-based terminal widget that renders lines from [GhosttyTerminalController].
 ///
 /// The controller keeps a real [VtTerminal] alive, and this widget sizes that
@@ -177,6 +209,7 @@ class GhosttyTerminalView extends StatefulWidget {
     this.focusOnInteraction = true,
     this.showKeyboardOnInteraction = true,
     this.softKeyboardController,
+    this.selectionController,
     this.onTapTerminal,
     this.focusNode,
     this.backgroundColor = const Color(0xFF0A0F14),
@@ -262,6 +295,11 @@ class GhosttyTerminalView extends StatefulWidget {
   /// Imperative handle to show/hide the soft keyboard from outside the view
   /// (e.g. a toolbar button). Only meaningful on mobile.
   final GhosttyTerminalSoftKeyboardController? softKeyboardController;
+
+  /// Imperative handle to drop the selection from outside the view. Required
+  /// by any host that replaces the screen wholesale — see
+  /// [GhosttyTerminalSelectionController] for why the view cannot do it alone.
+  final GhosttyTerminalSelectionController? selectionController;
 
   /// Optional callback invoked when the terminal receives a tap interaction.
   final VoidCallback? onTapTerminal;
@@ -735,6 +773,7 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
       );
     }
     _attachSoftKeyboardController(widget.softKeyboardController);
+    _attachSelectionController(widget.selectionController);
     _syncEngineColors();
   }
 
@@ -765,6 +804,44 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
       controller._hide = null;
       controller._isVisible = null;
     }
+  }
+
+  void _attachSelectionController(
+    GhosttyTerminalSelectionController? controller,
+  ) {
+    if (controller == null) {
+      return;
+    }
+    controller._clear = _clearSelectionExternally;
+    controller._hasSelection = () => _selection != null;
+  }
+
+  void _detachSelectionController(
+    GhosttyTerminalSelectionController? controller,
+  ) {
+    if (controller == null) {
+      return;
+    }
+    // Ownership check — see [_detachSoftKeyboardController].
+    if (controller._clear == _clearSelectionExternally) {
+      controller._clear = null;
+      controller._hasSelection = null;
+    }
+  }
+
+  /// The selection half of the teardown [didUpdateWidget] runs on a controller
+  /// swap, and only that half: the host calling this is replacing the screen,
+  /// not the terminal. Hover and auto-scroll therefore stay — the pointer is
+  /// still over the same terminal, and hover re-resolves on its next move,
+  /// where a selection would keep pointing at rewritten cells until the user
+  /// happened to click away.
+  void _clearSelectionExternally() {
+    if (!mounted) {
+      return;
+    }
+    _setSelection(null);
+    _selectionSession.clearLineSelectionAnchorRow();
+    _selectionSession.resetIgnoreNextTapClear();
   }
 
   /// Controller-driven keyboard summon: focus first — the IME connection is
@@ -918,6 +995,10 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
       _detachSoftKeyboardController(oldWidget.softKeyboardController);
       _attachSoftKeyboardController(widget.softKeyboardController);
     }
+    if (oldWidget.selectionController != widget.selectionController) {
+      _detachSelectionController(oldWidget.selectionController);
+      _attachSelectionController(widget.selectionController);
+    }
     if (oldWidget.palette != widget.palette ||
         oldWidget.foregroundColor != widget.foregroundColor ||
         oldWidget.backgroundColor != widget.backgroundColor ||
@@ -941,6 +1022,7 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
     _removeSelectionContextMenu();
     _stopAutoScroll();
     _detachSoftKeyboardController(widget.softKeyboardController);
+    _detachSelectionController(widget.selectionController);
     _softKeyboard?.hide();
     widget.controller.removeListener(_onControllerChanged);
     _scrollController.removeListener(_onScrollControllerChanged);

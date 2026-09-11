@@ -77,6 +77,7 @@ void main() {
       GhosttyTerminalInteractionPolicy interactionPolicy =
           GhosttyTerminalInteractionPolicy.auto,
       bool showSelectionContextMenu = true,
+      GhosttyTerminalSelectionController? selectionController,
       GhosttyTerminalSelectionContextMenuButtonItemsBuilder?
       selectionContextMenuButtonItemsBuilder,
       EdgeInsets? padding,
@@ -111,6 +112,7 @@ void main() {
               wordBoundaryPolicy: wordBoundaryPolicy,
               interactionPolicy: interactionPolicy,
               showSelectionContextMenu: showSelectionContextMenu,
+              selectionController: selectionController,
               selectionContextMenuButtonItemsBuilder:
                   selectionContextMenuButtonItemsBuilder,
               padding: padding ?? const EdgeInsets.all(12),
@@ -2215,6 +2217,80 @@ void main() {
 
       expect(currentSelection, isNull);
       expect(currentContent, isNull);
+    });
+
+    testWidgets('selectionController clears a live selection', (tester) async {
+      if (!hasNativeTerminal) {
+        return;
+      }
+
+      // The host case: a screen replaced wholesale under anchors the user set
+      // against the previous screen. Nothing the view can see distinguishes
+      // that write from ordinary output, so the host says so, and everything
+      // resolved from those anchors has to go with it.
+      final selectionController = GhosttyTerminalSelectionController();
+      GhosttyTerminalSelection? currentSelection;
+      GhosttyTerminalSelectionContent<GhosttyTerminalSelection>? currentContent;
+      controller.appendDebugOutput('hello  \r\nsecond line');
+
+      await tester.pumpWidget(
+        buildView(
+          autofocus: true,
+          selectionController: selectionController,
+          onSelectionChanged: (selection) => currentSelection = selection,
+          onSelectionContentChanged: (content) => currentContent = content,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(selectionController.hasSelection, isFalse);
+
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.keyA);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.keyA);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+      await tester.pump();
+
+      expect(currentSelection, isNotNull);
+      expect(selectionController.hasSelection, isTrue);
+
+      selectionController.clear();
+      await tester.pump();
+
+      expect(currentSelection, isNull);
+      expect(currentContent, isNull);
+      expect(selectionController.hasSelection, isFalse);
+
+      // Idempotent, because a host replacing the screen at frame rate calls it
+      // on every replace and cannot be asked to track whether one is live.
+      selectionController.clear();
+      await tester.pump();
+      expect(currentSelection, isNull);
+    });
+
+    testWidgets('selectionController detaches with its view', (tester) async {
+      if (!hasNativeTerminal) {
+        return;
+      }
+
+      final selectionController = GhosttyTerminalSelectionController();
+      controller.appendDebugOutput('hello world');
+
+      await tester.pumpWidget(
+        buildView(autofocus: true, selectionController: selectionController),
+      );
+      await tester.pumpAndSettle();
+      expect(selectionController.hasSelection, isFalse);
+
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pumpAndSettle();
+
+      // A handle outliving its view answers for nothing and calls into
+      // nothing, rather than reaching a disposed State.
+      expect(selectionController.hasSelection, isFalse);
+      selectionController.clear();
     });
 
     testWidgets('double click selects the whole word', (tester) async {
