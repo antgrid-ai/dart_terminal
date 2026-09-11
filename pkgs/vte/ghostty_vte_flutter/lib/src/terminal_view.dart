@@ -1249,46 +1249,50 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
       if (imeOwnsText && plainChord && key == GhosttyKey.GHOSTTY_KEY_ENTER) {
         return KeyEventResult.ignored;
       }
-      _jumpToLiveBottom();
-      if (_selection != null) {
-        _setSelection(null);
-      }
       // Special keys are encoded from the key enum/modifier state alone.
       // Forwarding printable text metadata here breaks keys like backspace.
-      final sent = widget.controller.sendKey(
-        key: key,
-        action: event is KeyRepeatEvent
-            ? GhosttyKeyAction.GHOSTTY_KEY_ACTION_REPEAT
-            : GhosttyKeyAction.GHOSTTY_KEY_ACTION_PRESS,
-        mods: mods,
-        utf8Text: '',
-        unshiftedCodepoint: 0,
+      return _afterKeySent(
+        widget.controller.sendKey(
+          key: key,
+          action: event is KeyRepeatEvent
+              ? GhosttyKeyAction.GHOSTTY_KEY_ACTION_REPEAT
+              : GhosttyKeyAction.GHOSTTY_KEY_ACTION_PRESS,
+          mods: mods,
+          utf8Text: '',
+          unshiftedCodepoint: 0,
+        ),
       );
-      return sent ? KeyEventResult.handled : KeyEventResult.ignored;
     }
 
     if (character.isNotEmpty) {
       if (imeOwnsText) {
         return KeyEventResult.ignored;
       }
-      _jumpToLiveBottom();
-      if (_selection != null) {
-        _setSelection(null);
-      }
-      final sent = widget.controller.write(character);
-      return sent ? KeyEventResult.handled : KeyEventResult.ignored;
+      return _afterKeySent(widget.controller.write(character));
     }
 
     if (controlText != null && controlText.isNotEmpty) {
-      _jumpToLiveBottom();
-      if (_selection != null) {
-        _setSelection(null);
-      }
-      final sent = widget.controller.write(controlText);
-      return sent ? KeyEventResult.handled : KeyEventResult.ignored;
+      return _afterKeySent(widget.controller.write(controlText));
     }
 
     return KeyEventResult.ignored;
+  }
+
+  /// The viewport bookkeeping a key earns by being ACCEPTED: typing returns you
+  /// to the live bottom and ends a selection you were about to overwrite.
+  ///
+  /// A key the terminal declined earns neither. Nothing consumed it, so nothing
+  /// happened for the viewport to follow -- and a view with no transport behind
+  /// it, which is how a host renders a static transcript through this widget,
+  /// declines every key. Doing this first yanked such a view to the bottom on
+  /// Page Up, the one key a transcript reader is most likely to press.
+  KeyEventResult _afterKeySent(bool sent) {
+    if (!sent) return KeyEventResult.ignored;
+    _jumpToLiveBottom();
+    if (_selection != null) {
+      _setSelection(null);
+    }
+    return KeyEventResult.handled;
   }
 
   Future<void> _copySelection(String text) async {

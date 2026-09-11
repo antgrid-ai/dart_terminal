@@ -2282,6 +2282,49 @@ void main() {
       },
     );
 
+    testWidgets(
+      'a key the terminal declines moves neither the viewport nor the selection',
+      (tester) async {
+        if (!hasNativeTerminal) {
+          return;
+        }
+
+        // The static-transcript host: a view over an engine with no transport,
+        // so every key is declined. Page Up is the first key such a reader
+        // presses, and following it to the live bottom returns them to the
+        // exact place they were scrolling away from.
+        controller.appendDebugOutput(
+          List<String>.generate(120, (index) => 'Line $index').join('\r\n'),
+        );
+
+        await tester.pumpWidget(buildView(showHeader: false, autofocus: true));
+        await tester.pumpAndSettle();
+
+        final metrics = _measureTestMetrics();
+        final pointer = TestPointer(1, PointerDeviceKind.mouse);
+        await tester.sendEventToBinding(pointer.hover(const Offset(200, 200)));
+        await tester.sendEventToBinding(
+          pointer.scroll(Offset(0, -metrics.linePixels * 6)),
+        );
+        await tester.pumpAndSettle();
+        final scrolledOffset = controller.viewportScrollbar?.offset;
+        expect(scrolledOffset, isNotNull);
+
+        await tester.sendKeyDownEvent(LogicalKeyboardKey.pageUp);
+        await tester.sendKeyUpEvent(LogicalKeyboardKey.pageUp);
+        await tester.pumpAndSettle();
+        expect(controller.viewportScrollbar?.offset, scrolledOffset);
+
+        // The same key, once something is listening, still does what typing
+        // into a live terminal has always done.
+        controller.attachExternalTransport(writeBytes: (_) => true);
+        await tester.sendKeyDownEvent(LogicalKeyboardKey.pageUp);
+        await tester.sendKeyUpEvent(LogicalKeyboardKey.pageUp);
+        await tester.pumpAndSettle();
+        expect(controller.viewportScrollbar?.offset, isNot(scrolledOffset));
+      },
+    );
+
     testWidgets('selectionController clears a live selection', (tester) async {
       if (!hasNativeTerminal) {
         return;
