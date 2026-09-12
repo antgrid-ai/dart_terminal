@@ -230,6 +230,8 @@ class GhosttyTerminalView extends StatefulWidget {
     this.palette = GhosttyTerminalPalette.xterm,
     this.minimumContrastRatio,
     this.cursorColor = const Color(0xFF9AD1C0),
+    this.unfocusedCursorColor,
+    this.showCursor = true,
     this.selectionColor = const Color(0x665DA9FF),
     this.hyperlinkColor = const Color(0xFF61AFEF),
     this.copyOptions = const GhosttyTerminalCopyOptions(),
@@ -416,6 +418,13 @@ class GhosttyTerminalView extends StatefulWidget {
 
   /// Cursor fill or stroke color, depending on cursor style.
   final Color cursorColor;
+
+  /// Color of the hollow cursor when keyboard focus is elsewhere.
+  /// Defaults to [cursorColor].
+  final Color? unfocusedCursorColor;
+
+  /// Hides the cursor without changing the guest terminal's cursor mode.
+  final bool showCursor;
 
   /// Overlay color used for interactive text selection highlights.
   final Color selectionColor;
@@ -778,7 +787,7 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
     super.initState();
     _focusNode = widget.focusNode ?? FocusNode();
     _ownsFocusNode = widget.focusNode == null;
-    _focusNode.addListener(_handleFocusChangedForSoftKeyboard);
+    _focusNode.addListener(_handleFocusChanged);
     _scrollController = widget.scrollController ?? ScrollController();
     _ownsScrollController = widget.scrollController == null;
     _scrollController.addListener(_onScrollControllerChanged);
@@ -877,7 +886,9 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
   /// when the host reserves keyboard summoning for its own affordance
   /// ([GhosttyTerminalView.showKeyboardOnInteraction] false); hide-on-blur
   /// always applies so a dismissed terminal never leaves a stale IME up.
-  void _handleFocusChangedForSoftKeyboard() {
+  void _handleFocusChanged() {
+    // Idle terminals must repaint focus even when no output arrives.
+    if (mounted) setState(() {});
     final keyboard = _softKeyboard;
     if (keyboard == null) {
       return;
@@ -980,14 +991,14 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
       _autoScrollSession.reset();
     }
     if (oldWidget.focusNode != widget.focusNode) {
-      _focusNode.removeListener(_handleFocusChangedForSoftKeyboard);
+      _focusNode.removeListener(_handleFocusChanged);
       if (_ownsFocusNode) {
         _focusNode.dispose();
       }
       _focusNode = widget.focusNode ?? FocusNode();
       _ownsFocusNode = widget.focusNode == null;
-      _focusNode.addListener(_handleFocusChangedForSoftKeyboard);
-      _handleFocusChangedForSoftKeyboard();
+      _focusNode.addListener(_handleFocusChanged);
+      _handleFocusChanged();
     }
     if (oldWidget.scrollController != widget.scrollController) {
       _scrollController.removeListener(_onScrollControllerChanged);
@@ -1047,7 +1058,7 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
     if (_ownsScrollController) {
       _scrollController.dispose();
     }
-    _focusNode.removeListener(_handleFocusChangedForSoftKeyboard);
+    _focusNode.removeListener(_handleFocusChanged);
     if (_ownsFocusNode) {
       _focusNode.dispose();
     }
@@ -3749,7 +3760,11 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
                             backgroundColor: widget.backgroundColor,
                             foregroundColor: widget.foregroundColor,
                             chromeColor: widget.chromeColor,
-                            cursorColor: widget.cursorColor,
+                            cursorColor: _focusNode.hasFocus
+                                ? widget.cursorColor
+                                : (widget.unfocusedCursorColor ??
+                                      widget.cursorColor),
+                            showCursor: widget.showCursor,
                             selectionColor: widget.selectionColor,
                             hyperlinkColor: widget.hyperlinkColor,
                             palette: widget.palette,
@@ -4206,6 +4221,7 @@ class _GhosttyTerminalPainter extends CustomPainter {
     required this.foregroundColor,
     required this.chromeColor,
     required this.cursorColor,
+    required this.showCursor,
     required this.selectionColor,
     required this.hyperlinkColor,
     required this.palette,
@@ -4263,6 +4279,7 @@ class _GhosttyTerminalPainter extends CustomPainter {
   final Color foregroundColor;
   final Color chromeColor;
   final Color cursorColor;
+  final bool showCursor;
   final Color selectionColor;
   final Color hyperlinkColor;
 
@@ -4584,7 +4601,9 @@ class _GhosttyTerminalPainter extends CustomPainter {
       }
     }
 
-    final cursor = scrollOffsetLines == 0 ? snapshot.cursor : null;
+    final cursor = showCursor && scrollOffsetLines == 0
+        ? snapshot.cursor
+        : null;
     if (cursor != null) {
       final cursorLine = cursor.row - start;
       if (cursorLine >= 0 && cursorLine < visible.length) {
@@ -4653,6 +4672,7 @@ class _GhosttyTerminalPainter extends CustomPainter {
         foregroundColor != oldDelegate.foregroundColor ||
         chromeColor != oldDelegate.chromeColor ||
         cursorColor != oldDelegate.cursorColor ||
+        showCursor != oldDelegate.showCursor ||
         selectionColor != oldDelegate.selectionColor ||
         hyperlinkColor != oldDelegate.hyperlinkColor ||
         palette != oldDelegate.palette ||
@@ -4935,7 +4955,8 @@ class _GhosttyTerminalPainter extends CustomPainter {
     required GhosttyTerminalRenderCursor cursor,
     required Color color,
   }) {
-    if (!cursor.visible ||
+    if (!showCursor ||
+        !cursor.visible ||
         !cursor.hasViewportPosition ||
         cursor.row == null ||
         cursor.col == null) {
@@ -4971,10 +4992,19 @@ class _GhosttyTerminalPainter extends CustomPainter {
       cursorRect.width,
       devicePixelRatio,
     );
-    final shouldShowCursorFill = focused || !cursor.blinking;
-    final drawColor = color.withValues(
-      alpha: cursor.passwordInput ? 0.95 : (focused ? 0.95 : 0.8),
-    );
+    // Guest cursor shape and blink mode cannot communicate local focus: a
+    // steady beam must become just as clearly inactive as a blinking block.
+    if (!focused) {
+      canvas.drawRect(
+        cursorRect.deflate(0.5),
+        Paint()
+          ..color = color
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 1,
+      );
+      return;
+    }
+    final drawColor = color.withValues(alpha: 0.95);
     final strokeColor = drawColor.withValues(alpha: 0.85);
     final fillPaint = Paint()..color = drawColor;
     final strokePaint = Paint()
@@ -5020,9 +5050,7 @@ class _GhosttyTerminalPainter extends CustomPainter {
             ..color = drawColor.withValues(alpha: 0.22)
             ..style = PaintingStyle.fill,
         );
-        if (shouldShowCursorFill) {
-          canvas.drawRect(shapeRect.deflate(0.5), strokePaint);
-        }
+        canvas.drawRect(shapeRect.deflate(0.5), strokePaint);
       case GhosttyRenderStateCursorVisualStyle
           .GHOSTTY_RENDER_STATE_CURSOR_VISUAL_STYLE_UNDERLINE:
       case GhosttyRenderStateCursorVisualStyle
@@ -5033,9 +5061,7 @@ class _GhosttyTerminalPainter extends CustomPainter {
       // the block shape so exhaustiveness still catches a real new variant.
       case GhosttyRenderStateCursorVisualStyle
           .GHOSTTY_RENDER_STATE_CURSOR_VISUAL_STYLE_MAX_VALUE:
-        if (shouldShowCursorFill) {
-          canvas.drawRect(shapeRect, fillPaint);
-        }
+        canvas.drawRect(shapeRect, fillPaint);
         canvas.drawRect(shapeRect, strokePaint);
     }
   }

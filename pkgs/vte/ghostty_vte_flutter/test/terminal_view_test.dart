@@ -64,6 +64,8 @@ void main() {
       Color? backgroundColor,
       Color? foregroundColor,
       Color? cursorColor,
+      Color? unfocusedCursorColor,
+      bool showCursor = true,
       Color? hyperlinkColor,
       Color? selectionColor,
       double? fontSize,
@@ -104,6 +106,8 @@ void main() {
               backgroundColor: backgroundColor ?? const Color(0xFF0A0F14),
               foregroundColor: foregroundColor ?? const Color(0xFFE6EDF3),
               cursorColor: cursorColor ?? const Color(0xFF9AD1C0),
+              unfocusedCursorColor: unfocusedCursorColor,
+              showCursor: showCursor,
               hyperlinkColor: hyperlinkColor ?? const Color(0xFF61AFEF),
               selectionColor: selectionColor ?? const Color(0x665DA9FF),
               fontSize: fontSize ?? 14,
@@ -418,6 +422,82 @@ void main() {
         );
       },
     );
+
+    for (final style in [1, 2, 3, 4, 5, 6]) {
+      testWidgets(
+        'cursor style $style becomes hollow on blur and can be hidden',
+        (tester) async {
+          if (!hasNativeTerminal) {
+            markTestSkipped('native VT unavailable');
+            return;
+          }
+          const active = Color(0xFFFF4FD8);
+          const inactive = Color(0xFF8090A0);
+          const background = Color(0xFF112233);
+          controller.appendDebugOutput('\x1b[$style q');
+          final focus = FocusNode();
+          addTearDown(focus.dispose);
+          final key = GlobalKey();
+          Widget view({bool showCursor = true}) => RepaintBoundary(
+            key: key,
+            child: buildView(
+              showHeader: false,
+              autofocus: true,
+              focusNode: focus,
+              renderer: GhosttyTerminalRendererMode.renderState,
+              backgroundColor: background,
+              cursorColor: active,
+              unfocusedCursorColor: inactive,
+              showCursor: showCursor,
+            ),
+          );
+          await tester.pumpWidget(view());
+          await tester.pumpAndSettle();
+          expect(focus.hasFocus, isTrue);
+          final focusedImage = await _captureTerminalImageData(tester, key);
+          expect(
+            _countPixelsNearColor(focusedImage, color: active),
+            greaterThan(0),
+          );
+          focus.unfocus();
+          await tester.pumpAndSettle();
+          expect(focus.hasFocus, isFalse);
+          final blurredImage = await _captureTerminalImageData(tester, key);
+          final (:charWidth, :linePixels, :padding) = _measureTestMetrics();
+          expect(
+            _pixelMatchesColor(
+              blurredImage,
+              x: padding + charWidth ~/ 2,
+              y: padding + linePixels ~/ 2,
+              color: background,
+            ),
+            isTrue,
+          );
+          expect(
+            _countPixelsNearColor(blurredImage, color: inactive),
+            greaterThan(0),
+          );
+          expect(_countPixelsNearColor(blurredImage, color: active), 0);
+          focus.requestFocus();
+          await tester.pumpAndSettle();
+          await tester.pumpWidget(view(showCursor: false));
+          await tester.pumpAndSettle();
+          final hiddenImage = await _captureTerminalImageData(tester, key);
+          expect(_countPixelsNearColor(hiddenImage, color: active), 0);
+          await tester.pumpWidget(view());
+          await tester.pumpAndSettle();
+          final restoredImage = await _captureTerminalImageData(tester, key);
+          expect(
+            _countPixelsNearColor(restoredImage, color: active),
+            greaterThan(0),
+          );
+          controller.appendDebugOutput('\x1b[?25l');
+          await tester.pumpAndSettle();
+          final guestHiddenImage = await _captureTerminalImageData(tester, key);
+          expect(_countPixelsNearColor(guestHiddenImage, color: active), 0);
+        },
+      );
+    }
 
     testWidgets('renderState honors widget cursor color', (tester) async {
       if (!hasNativeTerminal) {
@@ -2258,7 +2338,8 @@ void main() {
         expect(
           pastTop,
           0,
-          reason: 'a scroll that actually moved the transcript is not the '
+          reason:
+              'a scroll that actually moved the transcript is not the '
               'user asking for content this view does not hold',
         );
 
@@ -3170,7 +3251,7 @@ void main() {
       final opened = await tapUnderMouseReporting(
         tester,
         controller,
-        output: ']8;;$uriantgrid-ai/antgrid#13]8;;',
+        output: '\x1b]8;;$uriantgrid-ai/antgrid#13\x1b]8;;',
         col: 5,
       );
 
@@ -3195,7 +3276,7 @@ void main() {
         tester,
         controller,
         // Two leading spaces, so column 0 is outside the linked cells.
-        output: '  ]8;;$uriantgrid-ai/antgrid#13]8;;',
+        output: '  \x1b]8;;$uriantgrid-ai/antgrid#13\x1b]8;;',
         col: 0,
       );
 
