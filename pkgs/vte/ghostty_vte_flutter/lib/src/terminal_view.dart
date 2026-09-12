@@ -4373,7 +4373,8 @@ class _GhosttyTerminalPainter extends CustomPainter {
     );
 
     canvas.save();
-    canvas.clipRect(contentRect);
+    // Match the hard cell-background edges where the grid meets padding.
+    canvas.clipRect(contentRect, doAntiAlias: false);
     final nativeRender = renderSnapshot;
     if (renderer == GhosttyTerminalRendererMode.renderState &&
         nativeRender != null &&
@@ -4478,7 +4479,7 @@ class _GhosttyTerminalPainter extends CustomPainter {
         if (style.background.a > 0) {
           canvas.drawRect(
             Rect.fromLTRB(x, rowBand.top, x + width, rowBand.bottom),
-            Paint()..color = style.background,
+            _cellBackgroundPaint(style.background),
           );
         }
         x += width;
@@ -4749,7 +4750,7 @@ class _GhosttyTerminalPainter extends CustomPainter {
           rowBand.height,
         );
         if (run.background.a > 0) {
-          canvas.drawRect(rect, Paint()..color = run.background);
+          canvas.drawRect(rect, _cellBackgroundPaint(run.background));
         }
       }
       _paintNativeSelection(
@@ -5132,7 +5133,7 @@ class _GhosttyTerminalPainter extends CustomPainter {
           if (color.a > 0) {
             canvas.drawRect(
               Rect.fromLTRB(0, band.top, padding.left, band.bottom),
-              Paint()..color = color,
+              _cellBackgroundPaint(color),
             );
           }
         }
@@ -5141,7 +5142,7 @@ class _GhosttyTerminalPainter extends CustomPainter {
           if (color.a > 0) {
             canvas.drawRect(
               Rect.fromLTRB(gridRight, band.top, size.width, band.bottom),
-              Paint()..color = color,
+              _cellBackgroundPaint(color),
             );
           }
         }
@@ -5204,7 +5205,7 @@ class _GhosttyTerminalPainter extends CustomPainter {
         final x = padding.left + (col * charWidth);
         canvas.drawRect(
           Rect.fromLTRB(x, stripTop, x + (cell.width * charWidth), stripBottom),
-          Paint()..color = color,
+          _cellBackgroundPaint(color),
         );
       }
       col += cell.width;
@@ -5216,7 +5217,7 @@ class _GhosttyTerminalPainter extends CustomPainter {
       if (color.a > 0) {
         canvas.drawRect(
           Rect.fromLTRB(0, stripTop, padding.left, stripBottom),
-          Paint()..color = color,
+          _cellBackgroundPaint(color),
         );
       }
     }
@@ -5225,7 +5226,7 @@ class _GhosttyTerminalPainter extends CustomPainter {
       if (color.a > 0) {
         canvas.drawRect(
           Rect.fromLTRB(gridRight, stripTop, size.width, stripBottom),
-          Paint()..color = color,
+          _cellBackgroundPaint(color),
         );
       }
     }
@@ -6308,6 +6309,13 @@ void _debugLogUnsupportedGlyph(String text) {
     return true;
   }());
 }
+
+// Adjacent fills must cover their shared edge completely even when a parent
+// centers or scales the grid onto fractional pixels. Antialiasing each edge
+// separately blends the underlying background into visible seams.
+Paint _cellBackgroundPaint(Color color) => Paint()
+  ..color = color
+  ..isAntiAlias = false;
 
 _TerminalRowBand _rowBand({
   required double contentTop,

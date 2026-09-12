@@ -299,6 +299,62 @@ void main() {
       },
     );
 
+    for (final mode in GhosttyTerminalRendererMode.values) {
+      for (final scale in [1.0, 0.83]) {
+        for (final offset in [0.0, 0.5]) {
+          testWidgets(
+            'row backgrounds stay seamless in $mode at scale $scale offset $offset',
+            (tester) async {
+              const background = Color(0xFF373737);
+              controller.appendDebugOutput(
+                '\x1b[48;2;55;55;55m${List.filled(12, ' ' * 20).join('\r\n')}',
+              );
+              final key = GlobalKey();
+              await tester.pumpWidget(
+                RepaintBoundary(
+                  key: key,
+                  child: Transform.translate(
+                    offset: Offset(offset, offset),
+                    child: Transform.scale(
+                      scale: scale,
+                      alignment: Alignment.topLeft,
+                      child: buildView(
+                        showHeader: false,
+                        showCursor: false,
+                        renderer: mode,
+                        backgroundColor: const Color(0xFF0A0A0A),
+                      ),
+                    ),
+                  ),
+                ),
+              );
+              await tester.pumpAndSettle();
+              final image = await _captureTerminalImageData(tester, key);
+              for (var y = 30; y < 150; y++) {
+                final startX = mode == GhosttyTerminalRendererMode.renderState
+                    ? 3
+                    : 30;
+                for (var x = startX; x < 100; x++) {
+                  expect(
+                    _pixelMatchesColor(
+                      image,
+                      x: x,
+                      y: y,
+                      color: background,
+                      tolerance: 0,
+                    ),
+                    isTrue,
+                    reason: 'Background seam at ($x, $y)',
+                  );
+                }
+              }
+            },
+            skip: !hasNativeTerminal,
+          );
+        }
+      }
+    }
+
     testWidgets(
       'renderState honors widget default background and foreground colors',
       (tester) async {
