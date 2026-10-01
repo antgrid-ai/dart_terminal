@@ -50,6 +50,24 @@ class _FormatterOnlyController extends GhosttyTerminalController {
   GhosttyTerminalRenderSnapshot? get renderSnapshot => null;
 }
 
+/// Stands in for the web controller with a transcript that carries an OSC 8
+/// link, which the native formatter never does, so the formatter painter's
+/// hyperlink handling can be reached from a native test host.
+class _LinkedSnapshotController extends GhosttyTerminalController {
+  _LinkedSnapshotController(String formattedVt)
+    : _transcript = GhosttyTerminalSnapshot.fromFormattedVt(formattedVt);
+
+  final GhosttyTerminalSnapshot _transcript;
+
+  @override
+  GhosttyTerminalRenderSnapshot? get renderSnapshot => null;
+
+  @override
+  GhosttyTerminalSnapshot get snapshot => _transcript;
+}
+
+bool _isQuietTestLink(String uri) => uri.startsWith('antgrid-path:');
+
 void main() {
   group('GhosttyTerminalView', () {
     late GhosttyTerminalController controller;
@@ -99,11 +117,13 @@ void main() {
       onSelectionContentChanged,
       Future<void> Function(String text)? onCopySelection,
       Future<void> Function(String uri)? onOpenHyperlink,
+      bool Function(String uri)? isQuietHyperlink,
+      double width = 600,
     }) {
       return MaterialApp(
         home: Scaffold(
           body: SizedBox(
-            width: 600,
+            width: width,
             height: 400,
             child: GhosttyTerminalView(
               controller: terminalController ?? controller,
@@ -120,6 +140,7 @@ void main() {
               cursorTextColor: cursorTextColor,
               showCursor: showCursor,
               hyperlinkColor: hyperlinkColor ?? const Color(0xFF61AFEF),
+              isQuietHyperlink: isQuietHyperlink,
               selectionColor: selectionColor ?? const Color(0x665DA9FF),
               fontSize: fontSize ?? 14,
               lineHeight: lineHeight ?? 1.35,
@@ -1003,6 +1024,756 @@ void main() {
         _countPixelsNearColor(image, color: widgetHyperlink, tolerance: 28),
         greaterThan(10),
       );
+    });
+
+    group('quiet hyperlinks', () {
+      const accent = Color(0xFFFFA347);
+      const foreground = Color(0xFFE6EDF3);
+      const background = Color(0xFF112233);
+      const pathUri = 'antgrid-path:?p=src%2Fa.ts&b=r&k=f';
+
+      String link(String uri, String text) =>
+          '\x1b]8;;$uri\x07$text\x1b]8;;\x07';
+
+      // Pointer position over a cell's centre.
+      Offset cellCentre(_TestMetrics m, int col, [int row = 0]) => Offset(
+        (m.padding + (col * m.charWidth) + (m.charWidth ~/ 2)).toDouble(),
+        (m.padding + (row * m.linePixels) + (m.linePixels ~/ 2)).toDouble(),
+      );
+
+      // Pixels that differ between two captures within the given cell range.
+      int diffCells(
+        _TerminalImageData a,
+        _TerminalImageData b,
+        _TestMetrics m, {
+        int row = 0,
+        int fromCol = 0,
+        int toCol = 40,
+      }) => _countDiffPixels(
+        a,
+        b,
+        left: m.padding + (fromCol * m.charWidth),
+        top: m.padding + (row * m.linePixels),
+        right: m.padding + (toCol * m.charWidth),
+        bottom: m.padding + ((row + 1) * m.linePixels),
+      );
+
+      Future<GlobalKey> pumpQuietView(
+        WidgetTester tester, {
+        GlobalKey? key,
+        GhosttyTerminalController? terminalController,
+        double width = 600,
+      }) async {
+        final boundaryKey = key ?? GlobalKey();
+        await tester.pumpWidget(
+          RepaintBoundary(
+            key: boundaryKey,
+            child: buildView(
+              terminalController: terminalController,
+              showHeader: false,
+              showCursor: false,
+              width: width,
+              renderer: GhosttyTerminalRendererMode.renderState,
+              backgroundColor: background,
+              foregroundColor: foreground,
+              hyperlinkColor: accent,
+              isQuietHyperlink: _isQuietTestLink,
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        return boundaryKey;
+      }
+
+      Future<TestGesture> startMouse(WidgetTester tester) async {
+        final gesture = await tester.createGesture(
+          kind: ui.PointerDeviceKind.mouse,
+        );
+        await gesture.addPointer(location: Offset.zero);
+        addTearDown(gesture.removePointer);
+        await tester.pump();
+        return gesture;
+      }
+
+      // Outside the 600x400 view, so moving here leaves its mouse region.
+      const outsideView = Offset(700, 500);
+
+      // The explicit underline colour is what tells an underline apart from the
+      // test font's solid glyph boxes.
+      const underlineColour = '\x1b[58;2;0;255;0m';
+
+      // The accent override applies only to a cell with no foreground of its
+      // own, so a link that must show it has to be written in the default
+      // colour.
+      testWidgets('quiet link keeps the program colour', (tester) async {
+        if (!hasNativeTerminal) {
+          return;
+        }
+
+        controller.appendDebugOutput(
+          '${link(pathUri, 'src/a.ts')}\r\n'
+          '\x1b[38;2;255;0;0m${link(pathUri, 'src/b.ts')}',
+        );
+
+        final key = GlobalKey();
+        await tester.pumpWidget(
+          RepaintBoundary(
+            key: key,
+            child: buildView(
+              showHeader: false,
+              showCursor: false,
+              renderer: GhosttyTerminalRendererMode.renderState,
+              backgroundColor: background,
+              foregroundColor: foreground,
+              hyperlinkColor: accent,
+              isQuietHyperlink: _isQuietTestLink,
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        final image = await _captureTerminalImageData(tester, key);
+        expect(
+          _countPixelsNearColor(image, color: foreground, tolerance: 24),
+          greaterThan(10),
+        );
+        expect(
+          _countPixelsNearColor(
+            image,
+            color: const Color(0xFFFF0000),
+            tolerance: 24,
+          ),
+          greaterThan(0),
+        );
+        expect(_countPixelsNearColor(image, color: accent, tolerance: 28), 0);
+      });
+
+      testWidgets('link without the predicate stays accent', (tester) async {
+        if (!hasNativeTerminal) {
+          return;
+        }
+
+        controller.appendDebugOutput(link(pathUri, 'src/a.ts'));
+
+        final key = GlobalKey();
+        await tester.pumpWidget(
+          RepaintBoundary(
+            key: key,
+            child: buildView(
+              showHeader: false,
+              showCursor: false,
+              renderer: GhosttyTerminalRendererMode.renderState,
+              backgroundColor: background,
+              foregroundColor: foreground,
+              hyperlinkColor: accent,
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        final image = await _captureTerminalImageData(tester, key);
+        expect(
+          _countPixelsNearColor(image, color: accent, tolerance: 28),
+          greaterThan(10),
+        );
+      });
+
+      // Two mentions of one path carry the same URI, so the hovered URI never
+      // changes between them; only the hovered cell says which to underline.
+      // Each mention has an explicit underline colour so the underline is
+      // distinguishable from the test font's solid glyph boxes.
+      testWidgets('hovering a quiet link underlines only that mention', (
+        tester,
+      ) async {
+        if (!hasNativeTerminal) {
+          return;
+        }
+
+        controller.appendDebugOutput(
+          '\x1b[58;2;0;255;0m'
+          '${link(pathUri, 'src/a.ts')}    ${link(pathUri, 'src/a.ts')}',
+        );
+
+        final key = GlobalKey();
+        await tester.pumpWidget(
+          RepaintBoundary(
+            key: key,
+            child: buildView(
+              showHeader: false,
+              showCursor: false,
+              renderer: GhosttyTerminalRendererMode.renderState,
+              backgroundColor: background,
+              foregroundColor: foreground,
+              isQuietHyperlink: _isQuietTestLink,
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        final (:charWidth, :linePixels, :padding) = _measureTestMetrics();
+        Offset at(int col) => Offset(
+          (padding + (col * charWidth) + (charWidth ~/ 2)).toDouble(),
+          (padding + (linePixels ~/ 2)).toDouble(),
+        );
+        int diffOver(
+          _TerminalImageData a,
+          _TerminalImageData b, {
+          required int fromCol,
+          required int toCol,
+        }) => _countDiffPixels(
+          a,
+          b,
+          left: padding + (fromCol * charWidth),
+          top: padding,
+          right: padding + (toCol * charWidth),
+          bottom: padding + linePixels,
+        );
+
+        final baseline = await _captureTerminalImageData(tester, key);
+
+        final gesture = await tester.createGesture(
+          kind: ui.PointerDeviceKind.mouse,
+        );
+        await gesture.addPointer(location: Offset.zero);
+        addTearDown(gesture.removePointer);
+        await tester.pump();
+
+        await gesture.moveTo(at(2));
+        await tester.pumpAndSettle();
+        final onFirst = await _captureTerminalImageData(tester, key);
+        expect(
+          diffOver(baseline, onFirst, fromCol: 0, toCol: 8),
+          greaterThan(0),
+        );
+        expect(diffOver(baseline, onFirst, fromCol: 8, toCol: 40), 0);
+
+        await gesture.moveTo(at(14));
+        await tester.pumpAndSettle();
+        final onSecond = await _captureTerminalImageData(tester, key);
+        expect(diffOver(baseline, onSecond, fromCol: 0, toCol: 12), 0);
+        expect(
+          diffOver(baseline, onSecond, fromCol: 12, toCol: 20),
+          greaterThan(0),
+        );
+      });
+
+      testWidgets('quiet hover underline follows a rejoined path to the next '
+          'row', (tester) async {
+        if (!hasNativeTerminal) {
+          return;
+        }
+
+        // The font is only loaded once something has been laid out.
+        await tester.pumpWidget(buildView(showHeader: false));
+        await tester.pump();
+        final (:charWidth, :linePixels, :padding) = _measureTestMetrics();
+
+        // The bridge joins a path onto the next row when the row's block ends
+        // within four columns of the right edge. Columns are 20, so the
+        // boundary sits at an exclusive end of 16.
+        Future<({int upper, int lower, int lowerFromAbove})> hover({
+          required int firstRowChars,
+        }) async {
+          final linked = GhosttyTerminalController();
+          addTearDown(linked.dispose);
+          linked.appendDebugOutput(
+            '\x1b[58;2;0;255;0m'
+            '    ${link(pathUri, 'x' * firstRowChars)}\r\n'
+            '  ${link(pathUri, 'y' * 9)}',
+          );
+
+          final key = GlobalKey();
+          await tester.pumpWidget(
+            RepaintBoundary(
+              key: key,
+              child: buildView(
+                terminalController: linked,
+                showHeader: false,
+                showCursor: false,
+                // A pixel of slack so float rounding cannot drop the 20th column.
+                width: (2 * padding + 20 * charWidth + 1).toDouble(),
+                renderer: GhosttyTerminalRendererMode.renderState,
+                backgroundColor: background,
+                foregroundColor: foreground,
+                isQuietHyperlink: _isQuietTestLink,
+              ),
+            ),
+          );
+          await tester.pumpAndSettle();
+          expect(linked.cols, 20);
+
+          Offset at(int col, int row) => Offset(
+            (padding + (col * charWidth) + (charWidth ~/ 2)).toDouble(),
+            (padding + (row * linePixels) + (linePixels ~/ 2)).toDouble(),
+          );
+          int diffOver(
+            _TerminalImageData a,
+            _TerminalImageData b, {
+            required int row,
+            required int fromCol,
+            required int toCol,
+          }) => _countDiffPixels(
+            a,
+            b,
+            left: padding + (fromCol * charWidth),
+            top: padding + (row * linePixels),
+            right: padding + (toCol * charWidth),
+            bottom: padding + ((row + 1) * linePixels),
+          );
+
+          final baseline = await _captureTerminalImageData(tester, key);
+          final gesture = await tester.createGesture(
+            kind: ui.PointerDeviceKind.mouse,
+          );
+          await gesture.addPointer(location: Offset.zero);
+          await tester.pump();
+
+          await gesture.moveTo(at(5, 1));
+          await tester.pumpAndSettle();
+          final onLower = await _captureTerminalImageData(tester, key);
+
+          await gesture.moveTo(at(5, 0));
+          await tester.pumpAndSettle();
+          final onUpper = await _captureTerminalImageData(tester, key);
+
+          final result = (
+            upper: diffOver(
+              baseline,
+              onLower,
+              row: 0,
+              fromCol: 4,
+              toCol: 4 + firstRowChars,
+            ),
+            lower: diffOver(baseline, onLower, row: 1, fromCol: 2, toCol: 11),
+            lowerFromAbove: diffOver(
+              baseline,
+              onUpper,
+              row: 1,
+              fromCol: 2,
+              toCol: 11,
+            ),
+          );
+          await gesture.removePointer();
+          await tester.pumpWidget(const SizedBox.shrink());
+          return result;
+        }
+
+        // Exclusive end 20: joined, in both directions.
+        final joined = await hover(firstRowChars: 16);
+        expect(joined.lower, greaterThan(0));
+        expect(joined.upper, greaterThan(0));
+        expect(joined.lowerFromAbove, greaterThan(0));
+
+        // Exclusive end 16, exactly cols - 4: still joined.
+        final atEdge = await hover(firstRowChars: 12);
+        expect(atEdge.lower, greaterThan(0));
+        expect(atEdge.upper, greaterThan(0));
+        expect(atEdge.lowerFromAbove, greaterThan(0));
+
+        // Exclusive end 15: one short, so the rows are separate links.
+        final short = await hover(firstRowChars: 11);
+        expect(short.lower, greaterThan(0));
+        expect(short.upper, 0);
+        expect(short.lowerFromAbove, 0);
+      });
+
+      testWidgets('adjacent accent and quiet links do not merge', (
+        tester,
+      ) async {
+        if (!hasNativeTerminal) {
+          return;
+        }
+
+        const programUri = 'https://example.com/a';
+        controller.appendDebugOutput(
+          '${link(programUri, 'aaaa')}${link(pathUri, 'bbbb')}\r\n'
+          '${link(pathUri, 'bbbb')}${link(programUri, 'aaaa')}',
+        );
+
+        final key = GlobalKey();
+        await tester.pumpWidget(
+          RepaintBoundary(
+            key: key,
+            child: buildView(
+              showHeader: false,
+              showCursor: false,
+              renderer: GhosttyTerminalRendererMode.renderState,
+              backgroundColor: background,
+              foregroundColor: foreground,
+              hyperlinkColor: accent,
+              isQuietHyperlink: _isQuietTestLink,
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        final (:charWidth, :linePixels, :padding) = _measureTestMetrics();
+        final image = await _captureTerminalImageData(tester, key);
+        int accentOver({
+          required int row,
+          required int fromCol,
+          required int toCol,
+        }) => _countPixelsNearColorIn(
+          image,
+          color: accent,
+          tolerance: 28,
+          left: padding + (fromCol * charWidth),
+          top: padding + (row * linePixels),
+          right: padding + (toCol * charWidth),
+          bottom: padding + ((row + 1) * linePixels),
+        );
+
+        expect(accentOver(row: 0, fromCol: 0, toCol: 4), greaterThan(10));
+        expect(accentOver(row: 0, fromCol: 4, toCol: 8), 0);
+        expect(accentOver(row: 1, fromCol: 0, toCol: 4), 0);
+        expect(accentOver(row: 1, fromCol: 4, toCol: 8), greaterThan(10));
+      });
+
+      testWidgets('formatter path keeps quiet links quiet', (tester) async {
+        if (!hasNativeTerminal) {
+          return;
+        }
+
+        Future<_TerminalImageData> paint({
+          bool Function(String uri)? isQuietHyperlink,
+        }) async {
+          final linked = _LinkedSnapshotController(
+            '\x1b]8;;$pathUri\x07src/a.ts\x1b]8;;\x07',
+          );
+          addTearDown(linked.dispose);
+          final key = GlobalKey();
+          await tester.pumpWidget(
+            RepaintBoundary(
+              key: key,
+              child: buildView(
+                terminalController: linked,
+                showHeader: false,
+                showCursor: false,
+                renderer: GhosttyTerminalRendererMode.formatter,
+                backgroundColor: background,
+                foregroundColor: foreground,
+                hyperlinkColor: accent,
+                isQuietHyperlink: isQuietHyperlink,
+              ),
+            ),
+          );
+          await tester.pumpAndSettle();
+          final image = await _captureTerminalImageData(tester, key);
+          await tester.pumpWidget(const SizedBox.shrink());
+          return image;
+        }
+
+        final quiet = await paint(isQuietHyperlink: _isQuietTestLink);
+        expect(_countPixelsNearColor(quiet, color: accent, tolerance: 28), 0);
+        expect(
+          _countPixelsNearColor(quiet, color: foreground, tolerance: 24),
+          greaterThan(10),
+        );
+
+        final loud = await paint();
+        expect(
+          _countPixelsNearColor(loud, color: accent, tolerance: 28),
+          greaterThan(10),
+        );
+      });
+
+      testWidgets('formatter path underlines a hovered quiet link', (
+        tester,
+      ) async {
+        if (!hasNativeTerminal) {
+          return;
+        }
+
+        final linked = _LinkedSnapshotController(
+          '$underlineColour\x1b]8;;$pathUri\x07src/a.ts\x1b]8;;\x07',
+        );
+        addTearDown(linked.dispose);
+        final key = GlobalKey();
+        await tester.pumpWidget(
+          RepaintBoundary(
+            key: key,
+            child: buildView(
+              terminalController: linked,
+              showHeader: false,
+              showCursor: false,
+              renderer: GhosttyTerminalRendererMode.formatter,
+              backgroundColor: background,
+              foregroundColor: foreground,
+              isQuietHyperlink: _isQuietTestLink,
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        final m = _measureTestMetrics();
+        final baseline = await _captureTerminalImageData(tester, key);
+
+        final mouse = await startMouse(tester);
+        await mouse.moveTo(cellCentre(m, 2));
+        await tester.pumpAndSettle();
+        final hovered = await _captureTerminalImageData(tester, key);
+        expect(diffCells(baseline, hovered, m, toCol: 8), greaterThan(0));
+
+        await mouse.moveTo(outsideView);
+        await tester.pumpAndSettle();
+        final left = await _captureTerminalImageData(tester, key);
+        expect(diffCells(baseline, left, m), 0);
+      });
+
+      testWidgets('leaving a quiet link removes its underline', (tester) async {
+        if (!hasNativeTerminal) {
+          return;
+        }
+
+        controller.appendDebugOutput(
+          '$underlineColour${link(pathUri, 'src/a.ts')}',
+        );
+        final key = await pumpQuietView(tester);
+        final m = _measureTestMetrics();
+        final baseline = await _captureTerminalImageData(tester, key);
+
+        final mouse = await startMouse(tester);
+        await mouse.moveTo(cellCentre(m, 2));
+        await tester.pumpAndSettle();
+        final hovered = await _captureTerminalImageData(tester, key);
+        expect(diffCells(baseline, hovered, m, toCol: 8), greaterThan(0));
+
+        await mouse.moveTo(outsideView);
+        await tester.pumpAndSettle();
+        final left = await _captureTerminalImageData(tester, key);
+        expect(diffCells(baseline, left, m), 0);
+      });
+
+      testWidgets('swapping the controller drops the hovered link', (
+        tester,
+      ) async {
+        if (!hasNativeTerminal) {
+          return;
+        }
+
+        final output = '$underlineColour${link(pathUri, 'src/a.ts')}';
+        final first = GhosttyTerminalController();
+        addTearDown(first.dispose);
+        first.appendDebugOutput(output);
+        final key = await pumpQuietView(tester, terminalController: first);
+        final m = _measureTestMetrics();
+        final baseline = await _captureTerminalImageData(tester, key);
+
+        final mouse = await startMouse(tester);
+        await mouse.moveTo(cellCentre(m, 2));
+        await tester.pumpAndSettle();
+        final hovered = await _captureTerminalImageData(tester, key);
+        expect(diffCells(baseline, hovered, m, toCol: 8), greaterThan(0));
+
+        final second = GhosttyTerminalController();
+        addTearDown(second.dispose);
+        second.appendDebugOutput(output);
+        await pumpQuietView(tester, key: key, terminalController: second);
+        final swapped = await _captureTerminalImageData(tester, key);
+        expect(diffCells(baseline, swapped, m), 0);
+      });
+
+      testWidgets('content rewritten under a still pointer is not underlined', (
+        tester,
+      ) async {
+        if (!hasNativeTerminal) {
+          return;
+        }
+
+        controller.appendDebugOutput(
+          '$underlineColour${link(pathUri, 'src/a.ts')}',
+        );
+        final key = await pumpQuietView(tester);
+        final m = _measureTestMetrics();
+        final baseline = await _captureTerminalImageData(tester, key);
+
+        final mouse = await startMouse(tester);
+        await mouse.moveTo(cellCentre(m, 2));
+        await tester.pumpAndSettle();
+        final hovered = await _captureTerminalImageData(tester, key);
+        expect(diffCells(baseline, hovered, m, toCol: 8), greaterThan(0));
+
+        // Same text, different link: the pointer has not moved, so only the
+        // content tells the view the hovered link is gone.
+        controller.appendDebugOutput(
+          '\x1b[H$underlineColour'
+          '${link('antgrid-path:?p=other&b=r&k=f', 'src/a.ts')}',
+        );
+        await tester.pumpAndSettle();
+        final rewritten = await _captureTerminalImageData(tester, key);
+
+        await mouse.moveTo(outsideView);
+        await tester.pumpAndSettle();
+        final rewrittenAndLeft = await _captureTerminalImageData(tester, key);
+        expect(diffCells(rewritten, rewrittenAndLeft, m), 0);
+      });
+
+      testWidgets('hovering a quiet link under mouse reporting underlines it', (
+        tester,
+      ) async {
+        if (!hasNativeTerminal) {
+          return;
+        }
+
+        // A detected link is an OSC 8 cell to the engine, so a plain click on
+        // it opens it even while the program holds the mouse.
+        controller.terminal.setMode(VtModes.normalMouse, true);
+        controller.terminal.setMode(VtModes.sgrMouse, true);
+        controller.appendDebugOutput(
+          '$underlineColour${link(pathUri, 'src/a.ts')}',
+        );
+        final key = await pumpQuietView(tester);
+        final m = _measureTestMetrics();
+        final baseline = await _captureTerminalImageData(tester, key);
+
+        final mouse = await startMouse(tester);
+        await mouse.moveTo(cellCentre(m, 2));
+        await tester.pumpAndSettle();
+        final hovered = await _captureTerminalImageData(tester, key);
+        expect(diffCells(baseline, hovered, m, toCol: 8), greaterThan(0));
+      });
+
+      testWidgets('quiet hover underline spans at most three rows', (
+        tester,
+      ) async {
+        if (!hasNativeTerminal) {
+          return;
+        }
+
+        await tester.pumpWidget(buildView(showHeader: false));
+        await tester.pump();
+        final m = _measureTestMetrics();
+
+        // Four full rows of one link: every row ends at the right edge, so
+        // only the row cap stops the join.
+        final linked = GhosttyTerminalController();
+        addTearDown(linked.dispose);
+        linked.appendDebugOutput(
+          '$underlineColour${link(pathUri, 'x' * 80)}',
+        );
+        final key = await pumpQuietView(
+          tester,
+          terminalController: linked,
+          // A pixel of slack so float rounding cannot drop the 20th column.
+          width: (2 * m.padding + 20 * m.charWidth + 1).toDouble(),
+        );
+        expect(linked.cols, 20);
+
+        final baseline = await _captureTerminalImageData(tester, key);
+        final mouse = await startMouse(tester);
+
+        await mouse.moveTo(cellCentre(m, 5, 0));
+        await tester.pumpAndSettle();
+        final fromFirst = await _captureTerminalImageData(tester, key);
+        for (var row = 0; row < 3; row++) {
+          expect(
+            diffCells(baseline, fromFirst, m, row: row, toCol: 20),
+            greaterThan(0),
+            reason: 'row $row should be underlined',
+          );
+        }
+        expect(diffCells(baseline, fromFirst, m, row: 3, toCol: 20), 0);
+
+        await mouse.moveTo(cellCentre(m, 5, 3));
+        await tester.pumpAndSettle();
+        final fromLast = await _captureTerminalImageData(tester, key);
+        for (var row = 1; row < 4; row++) {
+          expect(
+            diffCells(baseline, fromLast, m, row: row, toCol: 20),
+            greaterThan(0),
+            reason: 'row $row should be underlined',
+          );
+        }
+        expect(diffCells(baseline, fromLast, m, row: 0, toCol: 20), 0);
+      });
+
+      // The scroll layer moves before the engine does, so for a frame the
+      // painted rows and the view's own start line disagree. Alternating
+      // quiet and accent lines make any off-by-one swap every row's class.
+      testWidgets('scrolling never classes a row against its neighbour', (
+        tester,
+      ) async {
+        if (!hasNativeTerminal) {
+          return;
+        }
+
+        const programUri = 'https://example.com/a';
+        // The accent lines are longer, so the cells past the quiet width tell
+        // the two kinds of line apart in the image.
+        controller.appendDebugOutput(
+          List<String>.generate(
+            120,
+            (i) => i.isEven
+                ? link(pathUri, 'q' * 6)
+                : link(programUri, 'a' * 12),
+          ).join('\r\n'),
+        );
+        final scrollController = ScrollController();
+        addTearDown(scrollController.dispose);
+        final key = GlobalKey();
+        await tester.pumpWidget(
+          RepaintBoundary(
+            key: key,
+            child: buildView(
+              scrollController: scrollController,
+              showHeader: false,
+              showCursor: false,
+              renderer: GhosttyTerminalRendererMode.renderState,
+              backgroundColor: background,
+              foregroundColor: foreground,
+              hyperlinkColor: accent,
+              isQuietHyperlink: _isQuietTestLink,
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        final m = _measureTestMetrics();
+
+        void expectEveryRowClassedByItsOwnLine(_TerminalImageData image) {
+          int near(Color color, int row, int fromCol, int toCol) =>
+              _countPixelsNearColorIn(
+                image,
+                color: color,
+                tolerance: 28,
+                left: m.padding + (fromCol * m.charWidth),
+                top: m.padding + (row * m.linePixels),
+                right: m.padding + (toCol * m.charWidth),
+                bottom: m.padding + ((row + 1) * m.linePixels),
+              );
+          var accentRows = 0;
+          var quietRows = 0;
+          for (var row = 0; row < 6; row++) {
+            final tailInk =
+                near(accent, row, 6, 12) + near(foreground, row, 6, 12);
+            if (tailInk > 0) {
+              accentRows++;
+              expect(near(accent, row, 0, 6), greaterThan(10), reason: '$row');
+            } else {
+              quietRows++;
+              expect(near(accent, row, 0, 6), 0, reason: '$row');
+              expect(
+                near(foreground, row, 0, 6),
+                greaterThan(10),
+                reason: '$row',
+              );
+            }
+          }
+          expect(accentRows, greaterThan(0));
+          expect(quietRows, greaterThan(0));
+        }
+
+        // An odd distance, so a row paired with its neighbour's line flips.
+        scrollController.jumpTo(3.0 * m.linePixels);
+        await tester.pump();
+        expectEveryRowClassedByItsOwnLine(
+          await _captureTerminalImageData(tester, key),
+        );
+
+        await tester.pumpAndSettle();
+        expectEveryRowClassedByItsOwnLine(
+          await _captureTerminalImageData(tester, key),
+        );
+      });
     });
 
     testWidgets('scrollback does not paint the snapshot cursor', (
@@ -5952,6 +6723,57 @@ int _countNonBackgroundPixelsInVerticalSpan(
   for (var y = startY; y <= endY; y++) {
     if (_pixelIsNonBackground(image, x: x, y: y)) {
       count++;
+    }
+  }
+  return count;
+}
+
+/// Pixels that differ between two captures of the same size inside the given
+/// rectangle, in image pixels.
+int _countDiffPixels(
+  _TerminalImageData a,
+  _TerminalImageData b, {
+  required int left,
+  required int top,
+  required int right,
+  required int bottom,
+}) {
+  var count = 0;
+  for (var y = top; y < bottom && y < a.height; y++) {
+    for (var x = left; x < right && x < a.width; x++) {
+      final index = ((y * a.width) + x) * 4;
+      if (a.rgba[index] != b.rgba[index] ||
+          a.rgba[index + 1] != b.rgba[index + 1] ||
+          a.rgba[index + 2] != b.rgba[index + 2] ||
+          a.rgba[index + 3] != b.rgba[index + 3]) {
+        count++;
+      }
+    }
+  }
+  return count;
+}
+
+int _countPixelsNearColorIn(
+  _TerminalImageData image, {
+  required Color color,
+  required int left,
+  required int top,
+  required int right,
+  required int bottom,
+  int tolerance = 24,
+}) {
+  var count = 0;
+  for (var y = top; y < bottom && y < image.height; y++) {
+    for (var x = left; x < right && x < image.width; x++) {
+      if (_pixelMatchesColor(
+        image,
+        x: x,
+        y: y,
+        color: color,
+        tolerance: tolerance,
+      )) {
+        count++;
+      }
     }
   }
   return count;

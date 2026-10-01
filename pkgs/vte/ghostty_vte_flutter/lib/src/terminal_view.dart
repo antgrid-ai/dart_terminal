@@ -242,6 +242,7 @@ class GhosttyTerminalView extends StatefulWidget {
     this.showCursor = true,
     this.selectionColor = const Color(0x665DA9FF),
     this.hyperlinkColor = const Color(0xFF61AFEF),
+    this.isQuietHyperlink,
     this.copyOptions = const GhosttyTerminalCopyOptions(),
     this.wordBoundaryPolicy = const GhosttyTerminalWordBoundaryPolicy(),
     this.selectionAutoScrollEdgeInset = 28,
@@ -447,6 +448,14 @@ class GhosttyTerminalView extends StatefulWidget {
 
   /// Fallback color used when hyperlinks do not specify their own style.
   final Color hyperlinkColor;
+
+  /// Links whose URI satisfies this paint in the cell's own colours and gain an
+  /// underline only while hovered. Null keeps every link accent-coloured and
+  /// underlined, the right default for links a program authored itself.
+  ///
+  /// Pass a top-level function: the view compares computed link data, not the
+  /// function, but a stable identity avoids recomputing that data every build.
+  final bool Function(String uri)? isQuietHyperlink;
 
   /// Controls how selected cells are converted back into plain text.
   final GhosttyTerminalCopyOptions copyOptions;
@@ -748,6 +757,18 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
   /// side rather than each caller's.
   String? _reportedHoverUri;
 
+  /// The cell under the pointer, in absolute rows, recorded on every hover
+  /// event and BEFORE the hovered URI is deduped.
+  ///
+  /// Two mentions of one path carry the same URI, so moving from one to the
+  /// other never changes the session's hovered URI — the cell is the only
+  /// thing that says which mention to underline.
+  ({int row, int col})? _hoveredLinkCell;
+
+  /// Link classes and the hovered span derived from the engine grid; see
+  /// [_resolveLinkClasses].
+  final _LinkClassMemo _linkMemo = _LinkClassMemo();
+
   /// Reports a hover change to the host, at most once per distinct URI.
   ///
   /// [afterFrame] is required from `didUpdateWidget`, which runs mid-build: a
@@ -1001,6 +1022,8 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
       _selectionHandleDragEdge = null;
       _lastSelectionHandleDragPosition = null;
       _selectionSession.reset();
+      _clearHoveredLinkCell();
+      _linkMemo.invalidate();
       // The pointer has not moved, but what is under it belongs to a terminal
       // that is gone — leaving a host's preview showing the old link.
       _notifyHoverChanged(afterFrame: true);
@@ -2817,6 +2840,14 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
     _TerminalMetrics metrics,
   ) {
     final position = _positionForOffset(localPosition, size, metrics);
+    final tracksLinkSpan = widget.isQuietHyperlink != null;
+    final cell = position == null
+        ? null
+        : (row: position.row, col: position.col);
+    final cellChanged = tracksLinkSpan && cell != _hoveredLinkCell;
+    if (tracksLinkSpan) {
+      _hoveredLinkCell = cell;
+    }
     if (!ghosttyTerminalUpdateHoveredLink<
       GhosttyTerminalCellPosition,
       GhosttyTerminalSelection
@@ -2825,10 +2856,131 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
       position: position,
       resolveUri: _resolveHyperlinkUriAt,
     )) {
+      // The session dedupes by URI, so a move between two mentions of one
+      // link lands here with nothing changed as far as it can tell.
+      if (cellChanged && _hoveredLinkSpanDiffers()) {
+        setState(() {});
+      }
       return;
     }
     setState(() {});
     _notifyHoverChanged();
+  }
+
+  /// Forgets the hovered cell on every path that clears the hover.
+  void _clearHoveredLinkCell() {
+    _hoveredLinkCell = null;
+  }
+
+  /// The engine render snapshot the link classes derive from, or null when
+  /// there is no quiet predicate or nothing is painted from the engine.
+  GhosttyTerminalRenderSnapshot? _linkRenderSnapshot() {
+    if (widget.isQuietHyperlink == null ||
+        widget.renderer != GhosttyTerminalRendererMode.renderState) {
+      return null;
+    }
+    final render = widget.controller.renderSnapshot;
+    return render != null && render.hasViewportData ? render : null;
+  }
+
+  void _syncLinkBlocks(
+    GhosttyTerminalRenderSnapshot render,
+    int engineStartLine,
+    bool Function(String uri) predicate,
+  ) {
+    _linkMemo.syncBlocks(
+      render: render,
+      revision: widget.controller.revision,
+      startLine: engineStartLine,
+      cols: widget.controller.cols,
+      rows: widget.controller.rows,
+      predicate: predicate,
+      uriAt: widget.controller.hyperlinkUriAt,
+    );
+  }
+
+  /// The absolute row of the engine viewport's top, which is what the render
+  /// snapshot's rows are indexed from. The Flutter scroll layer moves first and
+  /// the engine follows a frame later, so while a scroll is in flight this
+  /// differs from the view's own start line; link lookups that pair engine rows
+  /// with the wrong line would classify every row against its neighbour.
+  /// Call after [_linkRenderSnapshot], which settles the snapshot this must
+  /// agree with.
+  int _linkEngineStartLine(int startLine) =>
+      widget.controller.viewportScrollbar?.offset ?? startLine;
+
+  /// The span a hover underlines over the render snapshot's rows. The hovered
+  /// cell lives in the Flutter viewport's rows, so it is carried into the
+  /// engine's before the lookup.
+  _LinkSpan? _hoveredLinkSpanFor(int startLine, int engineStartLine) {
+    final cell = _hoveredLinkCell;
+    final uri = _hoveredHyperlink;
+    if (cell == null || uri == null) {
+      return null;
+    }
+    return _linkMemo.spanFor(
+      cell: (row: cell.row - startLine + engineStartLine, col: cell.col),
+      hoveredUri: uri,
+      startLine: engineStartLine,
+      cols: widget.controller.cols,
+    );
+  }
+
+  /// The hover span on the formatter path, which paints from the transcript
+  /// the view is reading anyway. Only read when a quiet link is hovered, so a
+  /// pointer over plain text costs nothing.
+  _LinkSpan? _formatterHoverSpan(bool Function(String uri) predicate) {
+    final cell = _hoveredLinkCell;
+    final uri = _hoveredHyperlink;
+    if (cell == null || uri == null || !predicate(uri)) {
+      return null;
+    }
+    return _LinkClassMemo.formatterSpan(
+      snapshot: widget.controller.snapshot,
+      cell: cell,
+      hoveredUri: uri,
+      cols: widget.controller.cols,
+      predicate: predicate,
+    );
+  }
+
+  /// Whether the span under the pointer is no longer the one last painted.
+  bool _hoveredLinkSpanDiffers() {
+    final predicate = widget.isQuietHyperlink;
+    if (predicate == null) {
+      return false;
+    }
+    final render = _linkRenderSnapshot();
+    if (render == null) {
+      return _formatterHoverSpan(predicate) != _linkMemo.span;
+    }
+    final engineStart = _linkEngineStartLine(_lastVisibleStartLine);
+    _syncLinkBlocks(render, engineStart, predicate);
+    return _hoveredLinkSpanFor(_lastVisibleStartLine, engineStart) !=
+        _linkMemo.span;
+  }
+
+  /// Brings [_linkMemo] up to date for this build. On the engine path it reads
+  /// only the render snapshot and `hyperlinkUriAt`, never the formatter
+  /// transcript, so a hover stays as cheap as it is without a predicate.
+  void _resolveLinkClasses(int startLine) {
+    final predicate = widget.isQuietHyperlink;
+    if (predicate == null) {
+      _linkMemo.clear();
+      return;
+    }
+    final render = _linkRenderSnapshot();
+    if (render == null) {
+      _linkMemo.setFormatterSpan(_formatterHoverSpan(predicate));
+      return;
+    }
+    final engineStart = _linkEngineStartLine(startLine);
+    _syncLinkBlocks(render, engineStart, predicate);
+    _linkMemo.applyHover(
+      hoveredUri: _hoveredHyperlink,
+      span: _hoveredLinkSpanFor(startLine, engineStart),
+      cols: widget.controller.cols,
+    );
   }
 
   Future<void> _openHyperlink(String uri) async {
@@ -3612,6 +3764,7 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
         _syncGrid(size, metrics);
         final viewport = _viewportFor(size, metrics);
         _lastVisibleStartLine = viewport.startLine;
+        _resolveLinkClasses(viewport.startLine);
 
         return Focus(
           focusNode: _focusNode,
@@ -3622,6 +3775,7 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
                 ? SystemMouseCursors.text
                 : SystemMouseCursors.click,
             onExit: (_) {
+              _clearHoveredLinkCell();
               if (ghosttyTerminalClearHoveredLink<GhosttyTerminalSelection>(
                 session: _selectionSession,
               )) {
@@ -3640,11 +3794,14 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
                   _explicitHyperlinkAt(event.localPosition, size, metrics) !=
                       null) {
                 _updateHoveredHyperlink(event.localPosition, size, metrics);
-              } else if (ghosttyTerminalClearHoveredLink<
-                GhosttyTerminalSelection
-              >(session: _selectionSession)) {
-                setState(() {});
-                _notifyHoverChanged();
+              } else {
+                _clearHoveredLinkCell();
+                if (ghosttyTerminalClearHoveredLink<GhosttyTerminalSelection>(
+                  session: _selectionSession,
+                )) {
+                  setState(() {});
+                  _notifyHoverChanged();
+                }
               }
               _sendMouseEvent(
                 GhosttyMouseAction.GHOSTTY_MOUSE_ACTION_MOTION,
@@ -3784,6 +3941,10 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
                             showCursor: widget.showCursor,
                             selectionColor: widget.selectionColor,
                             hyperlinkColor: widget.hyperlinkColor,
+                            isQuietHyperlink: widget.isQuietHyperlink,
+                            linkClasses: _linkMemo.classes,
+                            hoveredLinkSpan: _linkMemo.span,
+                            linkClassGeneration: _linkMemo.generation,
                             palette: widget.palette,
                             minimumContrastRatio: widget.minimumContrastRatio,
                             contrastFloorCache: _contrastFloorCache,
@@ -4242,6 +4403,10 @@ class _GhosttyTerminalPainter extends CustomPainter {
     required this.showCursor,
     required this.selectionColor,
     required this.hyperlinkColor,
+    required this.isQuietHyperlink,
+    required this.linkClasses,
+    required this.hoveredLinkSpan,
+    required this.linkClassGeneration,
     required this.palette,
     required this.minimumContrastRatio,
     required this.contrastFloorCache,
@@ -4301,6 +4466,17 @@ class _GhosttyTerminalPainter extends CustomPainter {
   final bool showCursor;
   final Color selectionColor;
   final Color hyperlinkColor;
+
+  /// Only the formatter fallback consults the predicate, per run. It is NOT
+  /// part of [shouldRepaint]: the engine path paints from [linkClasses], and
+  /// [linkClassGeneration] is what says that data changed.
+  final bool Function(String uri)? isQuietHyperlink;
+
+  /// Per viewport row, one [_LinkClass] per column; null when no predicate is
+  /// set, which keeps every hyperlink cell accent-painted.
+  final List<Uint8List?>? linkClasses;
+  final _LinkSpan? hoveredLinkSpan;
+  final int linkClassGeneration;
 
   /// ANSI palette for the formatter fallback. The renderState path takes its
   /// colors from the engine per cell and never consults this.
@@ -4478,17 +4654,30 @@ class _GhosttyTerminalPainter extends CustomPainter {
       final y = rowBand.top;
       final line = visible[visibleIndex];
       final row = start + visibleIndex;
-      final resolvedStyles = line.runs
-          .map(
-            (run) => _ResolvedTerminalStyle.fromRun(
-              run.style,
-              palette: palette,
-              defaultForeground: foregroundColor,
-              defaultBackground: backgroundColor,
-              hyperlinkColor: hyperlinkColor,
-            ),
-          )
-          .toList(growable: false);
+      final resolvedStyles = <_ResolvedTerminalStyle>[];
+      var runStartCell = 0;
+      for (final run in line.runs) {
+        final quiet = _isQuietRun(run.style);
+        resolvedStyles.add(
+          _ResolvedTerminalStyle.fromRun(
+            run.style,
+            palette: palette,
+            defaultForeground: foregroundColor,
+            defaultBackground: backgroundColor,
+            hyperlinkColor: hyperlinkColor,
+            quiet: quiet,
+            hovered:
+                quiet &&
+                (hoveredLinkSpan?.intersects(
+                      row,
+                      runStartCell,
+                      runStartCell + run.cells,
+                    ) ??
+                    false),
+          ),
+        );
+        runStartCell += run.cells;
+      }
 
       var x = padding.left;
       for (var runIndex = 0; runIndex < line.runs.length; runIndex++) {
@@ -4676,6 +4865,7 @@ class _GhosttyTerminalPainter extends CustomPainter {
               canvas,
               cellRect: cursorRect,
               line: line,
+              row: cursor.row,
               column: cursor.col,
               text: cursorText,
               cells: cursorCells,
@@ -4734,6 +4924,7 @@ class _GhosttyTerminalPainter extends CustomPainter {
         showCursor != oldDelegate.showCursor ||
         selectionColor != oldDelegate.selectionColor ||
         hyperlinkColor != oldDelegate.hyperlinkColor ||
+        linkClassGeneration != oldDelegate.linkClassGeneration ||
         palette != oldDelegate.palette ||
         minimumContrastRatio != oldDelegate.minimumContrastRatio ||
         selection != oldDelegate.selection ||
@@ -4795,6 +4986,9 @@ class _GhosttyTerminalPainter extends CustomPainter {
         defaultBackground: defaultBackground,
         nativeDefaultForeground: nativeDefaultForeground,
         nativeDefaultBackground: nativeDefaultBackground,
+        classesForRow: linkClasses == null || rowIndex >= linkClasses!.length
+            ? null
+            : linkClasses![rowIndex],
       );
       for (final run in runs) {
         if (run.width <= 0) {
@@ -4841,7 +5035,7 @@ class _GhosttyTerminalPainter extends CustomPainter {
               metadata: run.metadata,
               fallback: run.metadataBackground,
             ),
-            hasHyperlink: run.hasHyperlink,
+            hasHyperlink: run.linkClass == _LinkClass.accent,
           );
           // _resolveNativeForeground already applies the hyperlink override
           // (and the contrast floor on top of it); re-deriving it here from
@@ -4867,11 +5061,11 @@ class _GhosttyTerminalPainter extends CustomPainter {
             fontStyle: run.style.italic ? FontStyle.italic : FontStyle.normal,
             decoration: _nativeTextDecoration(
               style: run.style,
-              hasHyperlink: run.hasHyperlink,
+              linkClass: run.linkClass,
             ),
             decorationStyle: _nativeDecorationStyle(
               underline: run.style.underline,
-              hasHyperlink: run.hasHyperlink,
+              linkClass: run.linkClass,
             ),
             decorationColor: decorationColor,
           );
@@ -4913,11 +5107,11 @@ class _GhosttyTerminalPainter extends CustomPainter {
                       : FontStyle.normal,
                   decoration: _nativeTextDecoration(
                     style: run.style,
-                    hasHyperlink: run.hasHyperlink,
+                    linkClass: run.linkClass,
                   ),
                   decorationStyle: _nativeDecorationStyle(
                     underline: run.style.underline,
-                    hasHyperlink: run.hasHyperlink,
+                    linkClass: run.linkClass,
                   ),
                   decorationColor: decorationColor,
                 ),
@@ -5181,6 +5375,11 @@ class _GhosttyTerminalPainter extends CustomPainter {
     );
   }
 
+  bool _isQuietRun(GhosttyTerminalStyle style) {
+    final uri = style.hyperlink;
+    return uri != null && (isQuietHyperlink?.call(uri) ?? false);
+  }
+
   /// The formatter path's counterpart to [_paintNativeCursorGlyph]. Its cursor
   /// is always a block, so the same rule applies: whatever the block covered
   /// gets drawn again on top in a contrasting color.
@@ -5188,6 +5387,7 @@ class _GhosttyTerminalPainter extends CustomPainter {
     Canvas canvas, {
     required Rect cellRect,
     required GhosttyTerminalLine line,
+    required int row,
     required int column,
     required String text,
     required int cells,
@@ -5206,6 +5406,10 @@ class _GhosttyTerminalPainter extends CustomPainter {
       defaultForeground: foregroundColor,
       defaultBackground: backgroundColor,
       hyperlinkColor: hyperlinkColor,
+      quiet: _isQuietRun(run.style),
+      hovered:
+          _isQuietRun(run.style) &&
+          (hoveredLinkSpan?.intersects(row, column, column + cells) ?? false),
     );
     _paintCursorGlyph(
       canvas,
@@ -5513,10 +5717,21 @@ class _GhosttyTerminalPainter extends CustomPainter {
     required Color defaultBackground,
     required Color nativeDefaultForeground,
     required Color nativeDefaultBackground,
+    Uint8List? classesForRow,
   }) {
     if (cells.isEmpty) {
       return const <_NativeRenderRun>[];
     }
+    // Cells are not columns: a wide cell's spacer tail has no entry, so the
+    // class lookup walks widths rather than indexing.
+    final cellCols = List<int>.filled(cells.length, 0);
+    var widthSoFar = 0;
+    for (var index = 0; index < cells.length; index++) {
+      cellCols[index] = widthSoFar;
+      widthSoFar += cells[index].width;
+    }
+    int linkClassOf(int index) =>
+        _nativeLinkClass(cells[index], classesForRow, cellCols[index]);
     final runs = <_NativeRenderRun>[];
     var runStart = 0;
     var runStartCol = 0;
@@ -5548,7 +5763,7 @@ class _GhosttyTerminalPainter extends CustomPainter {
           width: runWidth,
           text: text,
           graphemeCellWidths: List<int>.unmodifiable(runGraphemeCellWidths),
-          hasHyperlink: firstCell.hasHyperlink,
+          linkClass: linkClassOf(runStart),
           hasRenderableText: text.isNotEmpty,
         ),
       );
@@ -5569,6 +5784,8 @@ class _GhosttyTerminalPainter extends CustomPainter {
             defaultBackground: defaultBackground,
             nativeDefaultForeground: nativeDefaultForeground,
             nativeDefaultBackground: nativeDefaultBackground,
+            previousLinkClass: linkClassOf(index - 1),
+            nextLinkClass: linkClassOf(index),
           );
       if (shouldStartNewRun) {
         flushCurrentRun();
@@ -5596,6 +5813,8 @@ class _GhosttyTerminalPainter extends CustomPainter {
     required Color defaultBackground,
     required Color nativeDefaultForeground,
     required Color nativeDefaultBackground,
+    required int previousLinkClass,
+    required int nextLinkClass,
   }) {
     final previousHasRenderableText = previous.text.isNotEmpty;
     final nextHasRenderableText = next.text.isNotEmpty;
@@ -5626,7 +5845,24 @@ class _GhosttyTerminalPainter extends CustomPainter {
               nativeDefaultForeground: nativeDefaultForeground,
               nativeDefaultBackground: nativeDefaultBackground,
             ) &&
-        previous.hasHyperlink == next.hasHyperlink;
+        previousLinkClass == nextLinkClass;
+  }
+
+  /// A cell's link class. Without computed classes — no predicate — a
+  /// hyperlink cell is accent, which is what it always was.
+  int _nativeLinkClass(
+    GhosttyTerminalRenderCell cell,
+    Uint8List? classesForRow,
+    int column,
+  ) {
+    if (!cell.hasHyperlink) {
+      return _LinkClass.none;
+    }
+    if (classesForRow == null || column >= classesForRow.length) {
+      return _LinkClass.accent;
+    }
+    final stored = classesForRow[column];
+    return stored == _LinkClass.none ? _LinkClass.accent : stored;
   }
 
   Color _resolveNativeForeground({
@@ -5773,13 +6009,13 @@ class _GhosttyTerminalPainter extends CustomPainter {
 
   TextDecoration _nativeTextDecoration({
     required GhosttyTerminalResolvedStyle style,
-    required bool hasHyperlink,
+    required int linkClass,
   }) {
     final decorations = <TextDecoration>[];
     if (style.underline != GhosttySgrUnderline.GHOSTTY_SGR_UNDERLINE_NONE) {
       decorations.add(TextDecoration.underline);
     }
-    if (hasHyperlink &&
+    if (_LinkClass.underlines(linkClass) &&
         (style.underline == GhosttySgrUnderline.GHOSTTY_SGR_UNDERLINE_NONE)) {
       decorations.add(TextDecoration.underline);
     }
@@ -5796,9 +6032,9 @@ class _GhosttyTerminalPainter extends CustomPainter {
 
   TextDecorationStyle _nativeDecorationStyle({
     required GhosttySgrUnderline underline,
-    required bool hasHyperlink,
+    required int linkClass,
   }) {
-    if (hasHyperlink &&
+    if (_LinkClass.underlines(linkClass) &&
         underline == GhosttySgrUnderline.GHOSTTY_SGR_UNDERLINE_NONE) {
       return TextDecorationStyle.solid;
     }
@@ -6771,7 +7007,7 @@ final class _NativeRenderRun {
     required this.text,
     required this.graphemeCellWidths,
     required this.hasRenderableText,
-    required this.hasHyperlink,
+    required this.linkClass,
   });
 
   final GhosttyTerminalResolvedStyle style;
@@ -6783,7 +7019,7 @@ final class _NativeRenderRun {
   final String text;
   final List<int> graphemeCellWidths;
   final bool hasRenderableText;
-  final bool hasHyperlink;
+  final int linkClass;
 }
 
 /// Style for one formatter-snapshot run. The engine render-state path resolves
@@ -6806,6 +7042,8 @@ final class _ResolvedTerminalStyle {
     required Color defaultForeground,
     required Color defaultBackground,
     required Color hyperlinkColor,
+    bool quiet = false,
+    bool hovered = false,
   }) {
     final resolved = GhosttyTerminalResolvedStyle.fromFormattedStyle(
       style: style,
@@ -6814,7 +7052,12 @@ final class _ResolvedTerminalStyle {
       defaultBackground: defaultBackground,
     );
     final hasHyperlink = style.hyperlink != null;
-    final textForeground = hasHyperlink && !resolved.hasExplicitForeground
+    // A quiet link keeps the cell's own colours and is underlined only while
+    // hovered; every other link keeps the accent colour and a standing
+    // underline.
+    final accentLink = hasHyperlink && !quiet;
+    final underlinedLink = accentLink || (hasHyperlink && hovered);
+    final textForeground = accentLink && !resolved.hasExplicitForeground
         ? hyperlinkColor
         : resolved.foreground;
     final decorationColor = resolved.hasExplicitUnderlineColor
@@ -6824,7 +7067,7 @@ final class _ResolvedTerminalStyle {
     final decoration = <TextDecoration>[
       if (resolved.underline != GhosttySgrUnderline.GHOSTTY_SGR_UNDERLINE_NONE)
         TextDecoration.underline,
-      if (hasHyperlink &&
+      if (underlinedLink &&
           (resolved.underline ==
               GhosttySgrUnderline.GHOSTTY_SGR_UNDERLINE_NONE))
         TextDecoration.underline,
@@ -7930,4 +8173,392 @@ class _GhosttyTerminalSoftKeyboard with DeltaTextInputClient {
 
   @override
   bool onFocusReceived() => false;
+}
+
+/// How one terminal cell's hyperlink is painted. Plain ints, not an enum: they
+/// live in a per-row [Uint8List] the painter indexes by column.
+abstract final class _LinkClass {
+  static const int none = 0;
+
+  /// The program's own link: accent colour, standing underline.
+  static const int accent = 1;
+
+  /// A link the host asked to render quietly: the cell's own colours.
+  static const int quiet = 2;
+
+  /// A quiet link under the pointer: underlined, still the cell's colours.
+  static const int quietHovered = 3;
+
+  static bool underlines(int linkClass) =>
+      linkClass == accent || linkClass == quietHovered;
+}
+
+/// Mirrors the bridge's hard-wrap join rule for detected paths, which carries
+/// one URI on every row it spans: a row's block continues onto the next when
+/// its exclusive end column is within this many columns of the right edge, and
+/// a path spans at most [_kLinkMaxJoinedRows] rows. Keep both in step with the
+/// bridge's WRAP_EDGE_SLACK and MAX_JOINED_PATH_LINES.
+const int _kLinkWrapEdgeSlack = 4;
+const int _kLinkMaxJoinedRows = 3;
+
+/// A maximal run of same-URI hyperlink cells on one row. [end] is exclusive.
+final class _LinkBlock {
+  const _LinkBlock(this.start, this.end, this.uri, this.quiet);
+
+  final int start;
+  final int end;
+  final String? uri;
+  final bool quiet;
+}
+
+/// The cells a hovered quiet link underlines, one column range per row. Rows
+/// are absolute, the same space as the hovered cell.
+@immutable
+final class _LinkSpan {
+  const _LinkSpan(this.parts);
+
+  final List<({int row, int start, int end})> parts;
+
+  bool intersects(int row, int startCol, int endCol) {
+    for (final part in parts) {
+      if (part.row == row && part.start < endCol && startCol < part.end) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  @override
+  bool operator ==(Object other) =>
+      other is _LinkSpan && listEquals(parts, other.parts);
+
+  @override
+  int get hashCode => Object.hashAll(parts);
+}
+
+/// The cells a hover on [cell] underlines: the same-URI block under it, joined
+/// onto neighbouring rows by the bridge's rule. [blocksAt] answers for an
+/// absolute row, null where the row is outside what is known or has no links.
+/// Null when [cell] is not on a quiet link carrying [hoveredUri], which also
+/// covers content that changed under a pointer that has not moved.
+_LinkSpan? _joinedLinkSpan({
+  required ({int row, int col}) cell,
+  required String hoveredUri,
+  required int cols,
+  required List<_LinkBlock>? Function(int row) blocksAt,
+}) {
+  final rowBlocks = blocksAt(cell.row);
+  if (rowBlocks == null) {
+    return null;
+  }
+  final hitIndex = rowBlocks.indexWhere(
+    (b) => cell.col >= b.start && cell.col < b.end,
+  );
+  if (hitIndex < 0) {
+    return null;
+  }
+  final hit = rowBlocks[hitIndex];
+  if (!hit.quiet || hit.uri != hoveredUri) {
+    return null;
+  }
+
+  _LinkBlock? sameUri(List<_LinkBlock>? blocks, {required bool last}) {
+    if (blocks == null) {
+      return null;
+    }
+    final ordered = last ? blocks.reversed : blocks;
+    for (final b in ordered) {
+      if (b.uri == hoveredUri) {
+        return b;
+      }
+    }
+    return null;
+  }
+
+  final parts = <({int row, int start, int end})>[
+    (row: cell.row, start: hit.start, end: hit.end),
+  ];
+  var forwardRow = cell.row;
+  var forward = hit;
+  while (parts.length < _kLinkMaxJoinedRows &&
+      forward.end >= cols - _kLinkWrapEdgeSlack) {
+    final next = sameUri(blocksAt(forwardRow + 1), last: false);
+    if (next == null) {
+      break;
+    }
+    forwardRow++;
+    forward = next;
+    parts.add((row: forwardRow, start: next.start, end: next.end));
+  }
+
+  var backwardRow = cell.row;
+  var backwardIndex = hitIndex;
+  while (parts.length < _kLinkMaxJoinedRows && backwardIndex == 0) {
+    final previousBlocks = blocksAt(backwardRow - 1);
+    final previous = sameUri(previousBlocks, last: true);
+    if (previous == null || previous.end < cols - _kLinkWrapEdgeSlack) {
+      break;
+    }
+    backwardRow--;
+    backwardIndex = previousBlocks!.indexOf(previous);
+    parts.insert(0, (
+      row: backwardRow,
+      start: previous.start,
+      end: previous.end,
+    ));
+  }
+  return _LinkSpan(parts);
+}
+
+/// Link classes for the viewport, derived from the engine grid and memoised.
+///
+/// Per-row blocks depend on (revision, viewport start, size, predicate); the
+/// painted classes additionally on the hovered URI and span. [generation]
+/// bumps whenever the painted classes may differ, which is the only thing the
+/// painter's shouldRepaint compares.
+final class _LinkClassMemo {
+  int? _revision;
+  int _startLine = -1;
+  int _cols = -1;
+  int _rows = -1;
+  Object? _predicate;
+  List<List<_LinkBlock>?> _blocks = const <List<_LinkBlock>?>[];
+  int _blocksVersion = 0;
+
+  int _classesBlocksVersion = -1;
+  int _classesCols = -1;
+  String? _hoveredUri;
+
+  List<Uint8List?>? classes;
+  _LinkSpan? span;
+  int generation = 0;
+
+  /// Drops everything, for a controller swap: the new controller's revision
+  /// can coincide with the old one's.
+  void invalidate() {
+    _revision = null;
+    _classesBlocksVersion = -1;
+  }
+
+  /// No predicate, or nothing to derive classes from.
+  void clear() => setFormatterSpan(null);
+
+  /// The formatter path's state: it classifies each run itself, so only the
+  /// hovered span is carried, and the engine-derived data is dropped.
+  void setFormatterSpan(_LinkSpan? next) {
+    _revision = null;
+    _classesBlocksVersion = -1;
+    if (classes == null && span == next) {
+      return;
+    }
+    classes = null;
+    span = next;
+    _hoveredUri = null;
+    generation++;
+  }
+
+  /// The span a hover on [cell] underlines over the formatter transcript,
+  /// joined across rows by the same rule as the engine path. Rows are indexes
+  /// into [snapshot]'s lines, the space the hovered cell is in.
+  static _LinkSpan? formatterSpan({
+    required GhosttyTerminalSnapshot snapshot,
+    required ({int row, int col}) cell,
+    required String hoveredUri,
+    required int cols,
+    required bool Function(String uri) predicate,
+  }) {
+    final built = <int, List<_LinkBlock>?>{};
+    List<_LinkBlock>? blocksAt(int row) {
+      if (row < 0 || row >= snapshot.lines.length) {
+        return null;
+      }
+      return built.putIfAbsent(row, () {
+        final blocks = <_LinkBlock>[];
+        var col = 0;
+        for (final run in snapshot.lines[row].runs) {
+          final uri = run.style.hyperlink;
+          if (uri != null) {
+            final last = blocks.isEmpty ? null : blocks.last;
+            if (last != null && last.end == col && last.uri == uri) {
+              blocks[blocks.length - 1] = _LinkBlock(
+                last.start,
+                col + run.cells,
+                uri,
+                last.quiet,
+              );
+            } else {
+              blocks.add(_LinkBlock(col, col + run.cells, uri, predicate(uri)));
+            }
+          }
+          col += run.cells;
+        }
+        return blocks.isEmpty ? null : blocks;
+      });
+    }
+
+    return _joinedLinkSpan(
+      cell: cell,
+      hoveredUri: hoveredUri,
+      cols: cols,
+      blocksAt: blocksAt,
+    );
+  }
+
+  void syncBlocks({
+    required GhosttyTerminalRenderSnapshot render,
+    required int revision,
+    required int startLine,
+    required int cols,
+    required int rows,
+    required bool Function(String uri) predicate,
+    required String? Function(GhosttyTerminalCellPosition position) uriAt,
+  }) {
+    if (_revision == revision &&
+        _startLine == startLine &&
+        _cols == cols &&
+        _rows == rows &&
+        identical(_predicate, predicate)) {
+      return;
+    }
+    _revision = revision;
+    _startLine = startLine;
+    _cols = cols;
+    _rows = rows;
+    _predicate = predicate;
+    _blocksVersion++;
+
+    final rowsData = render.rowsData;
+    final blocks = List<List<_LinkBlock>?>.filled(rowsData.length, null);
+    for (var r = 0; r < rowsData.length; r++) {
+      final row = rowsData[r];
+      if (!row.hasHyperlink) {
+        continue;
+      }
+      final rowBlocks = <_LinkBlock>[];
+      final blockCols = <int>[];
+      var blockEnd = 0;
+      var col = 0;
+
+      String? uriFor(int c) =>
+          uriAt(GhosttyTerminalCellPosition(row: startLine + r, col: c));
+
+      void add(int start, int end, String? uri) {
+        rowBlocks.add(
+          _LinkBlock(start, end, uri, uri != null && predicate(uri)),
+        );
+      }
+
+      void flush() {
+        if (blockCols.isEmpty) {
+          return;
+        }
+        // Two lookups per block: one URI per contiguous block is the
+        // overwhelmingly common case, and per-cell lookups are paid only when
+        // the ends disagree.
+        final first = uriFor(blockCols.first);
+        final last = blockCols.length == 1 ? first : uriFor(blockCols.last);
+        if (first == last) {
+          add(blockCols.first, blockEnd, first);
+        } else {
+          var runStart = blockCols.first;
+          var runUri = first;
+          for (var i = 1; i < blockCols.length; i++) {
+            final uri = uriFor(blockCols[i]);
+            if (uri != runUri) {
+              add(runStart, blockCols[i], runUri);
+              runStart = blockCols[i];
+              runUri = uri;
+            }
+          }
+          add(runStart, blockEnd, runUri);
+        }
+        blockCols.clear();
+      }
+
+      for (final cell in row.cells) {
+        if (cell.hasHyperlink) {
+          blockCols.add(col);
+          blockEnd = col + cell.width;
+        } else {
+          flush();
+        }
+        col += cell.width;
+      }
+      flush();
+      blocks[r] = rowBlocks;
+    }
+    _blocks = blocks;
+  }
+
+  /// The span a hover on [cell] underlines, or null when the cell is not on a
+  /// quiet link carrying [hoveredUri] — which also covers content that changed
+  /// under a pointer that has not moved.
+  _LinkSpan? spanFor({
+    required ({int row, int col}) cell,
+    required String hoveredUri,
+    required int startLine,
+    required int cols,
+  }) {
+    return _joinedLinkSpan(
+      cell: cell,
+      hoveredUri: hoveredUri,
+      cols: cols,
+      blocksAt: (row) {
+        final r = row - startLine;
+        return r < 0 || r >= _blocks.length ? null : _blocks[r];
+      },
+    );
+  }
+
+  /// Rebuilds the painted classes when anything they depend on changed,
+  /// bumping [generation].
+  void applyHover({
+    required String? hoveredUri,
+    required _LinkSpan? span,
+    required int cols,
+  }) {
+    if (_classesBlocksVersion == _blocksVersion &&
+        _classesCols == cols &&
+        _hoveredUri == hoveredUri &&
+        this.span == span) {
+      return;
+    }
+    _classesBlocksVersion = _blocksVersion;
+    _classesCols = cols;
+    _hoveredUri = hoveredUri;
+    this.span = span;
+    generation++;
+
+    final out = List<Uint8List?>.filled(_blocks.length, null);
+    for (var r = 0; r < _blocks.length; r++) {
+      final rowBlocks = _blocks[r];
+      if (rowBlocks == null) {
+        continue;
+      }
+      final bytes = Uint8List(cols);
+      for (final b in rowBlocks) {
+        final linkClass = b.quiet ? _LinkClass.quiet : _LinkClass.accent;
+        for (var c = b.start; c < b.end && c < cols; c++) {
+          bytes[c] = linkClass;
+        }
+      }
+      out[r] = bytes;
+    }
+    if (span != null) {
+      for (final part in span.parts) {
+        final rowIndex = part.row - _startLine;
+        if (rowIndex < 0 || rowIndex >= out.length) {
+          continue;
+        }
+        final bytes = out[rowIndex];
+        if (bytes == null) {
+          continue;
+        }
+        for (var c = part.start; c < part.end && c < cols; c++) {
+          bytes[c] = _LinkClass.quietHovered;
+        }
+      }
+    }
+    classes = out;
+  }
 }
