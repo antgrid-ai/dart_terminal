@@ -363,6 +363,26 @@ final class GhosttyTerminalLine {
     return buffer.toString();
   }
 
+  /// Returns the styled run covering the given zero-based terminal column, or
+  /// null when [col] lies outside the line.
+  ///
+  /// Runs carry a cell span rather than one entry per column, so the column is
+  /// resolved by walking [GhosttyTerminalRun.cells].
+  GhosttyTerminalRun? runAtCell(int col) {
+    if (col < 0) {
+      return null;
+    }
+    var cellIndex = 0;
+    for (final run in runs) {
+      final runEnd = cellIndex + run.cells;
+      if (col < runEnd) {
+        return run;
+      }
+      cellIndex = runEnd;
+    }
+    return null;
+  }
+
   /// Returns the OSC 8 hyperlink at the given zero-based terminal column.
   String? hyperlinkAtCell(int col) {
     return _hyperlinkInfoAtCell(col)?.uri;

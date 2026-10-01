@@ -41,6 +41,15 @@ _TestMetrics _measureTestMetrics() {
   return (charWidth: charWidth, linePixels: linePixels, padding: padding);
 }
 
+/// Stands in for the web controller, which populates the formatter snapshot but
+/// hardcodes a null render snapshot. That is the only configuration in which the
+/// painter falls back to the formatter's own cursor, so it is the only way to
+/// reach the formatter cursor path from a native test host.
+class _FormatterOnlyController extends GhosttyTerminalController {
+  @override
+  GhosttyTerminalRenderSnapshot? get renderSnapshot => null;
+}
+
 void main() {
   group('GhosttyTerminalView', () {
     late GhosttyTerminalController controller;
@@ -65,6 +74,7 @@ void main() {
       Color? foregroundColor,
       Color? cursorColor,
       Color? unfocusedCursorColor,
+      Color? cursorTextColor,
       bool showCursor = true,
       Color? hyperlinkColor,
       Color? selectionColor,
@@ -107,6 +117,7 @@ void main() {
               foregroundColor: foregroundColor ?? const Color(0xFFE6EDF3),
               cursorColor: cursorColor ?? const Color(0xFF9AD1C0),
               unfocusedCursorColor: unfocusedCursorColor,
+              cursorTextColor: cursorTextColor,
               showCursor: showCursor,
               hyperlinkColor: hyperlinkColor ?? const Color(0xFF61AFEF),
               selectionColor: selectionColor ?? const Color(0x665DA9FF),
@@ -595,6 +606,157 @@ void main() {
         ),
         isTrue,
       );
+    });
+
+    testWidgets('renderState block cursor reveals the character under it', (
+      tester,
+    ) async {
+      if (!hasNativeTerminal) {
+        return;
+      }
+
+      const widgetCursor = Color(0xFF44D7FF);
+      const cursorText = Color(0xFFFF2200);
+
+      // Steady block, then park the cursor back on the 'b'.
+      controller.appendDebugOutput('[2 qabc[D[D');
+
+      final key = GlobalKey();
+      await tester.pumpWidget(
+        RepaintBoundary(
+          key: key,
+          child: buildView(
+            showHeader: false,
+            autofocus: true,
+            renderer: GhosttyTerminalRendererMode.renderState,
+            backgroundColor: const Color(0xFF112233),
+            foregroundColor: const Color(0xFFE6EDF3),
+            cursorColor: widgetCursor,
+            cursorTextColor: cursorText,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final image = await _captureTerminalImageData(tester, key);
+      // The glyph is re-drawn on top of the block in the cursor-text color,
+      // so those pixels exist only because the cursor stopped hiding it.
+      expect(
+        _countPixelsNearColor(image, color: cursorText, tolerance: 16),
+        greaterThan(0),
+      );
+    });
+
+    testWidgets('renderState block cursor on a blank cell draws no glyph', (
+      tester,
+    ) async {
+      if (!hasNativeTerminal) {
+        return;
+      }
+
+      const widgetCursor = Color(0xFF44D7FF);
+      const cursorText = Color(0xFFFF2200);
+
+      // Cursor sits past the end of 'abc', on an empty cell.
+      controller.appendDebugOutput('[2 qabc');
+
+      final key = GlobalKey();
+      await tester.pumpWidget(
+        RepaintBoundary(
+          key: key,
+          child: buildView(
+            showHeader: false,
+            autofocus: true,
+            renderer: GhosttyTerminalRendererMode.renderState,
+            backgroundColor: const Color(0xFF112233),
+            foregroundColor: const Color(0xFFE6EDF3),
+            cursorColor: widgetCursor,
+            cursorTextColor: cursorText,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final image = await _captureTerminalImageData(tester, key);
+      expect(_countPixelsNearColor(image, color: cursorText, tolerance: 16), 0);
+    });
+
+    testWidgets('formatter block cursor reveals the character under it', (
+      tester,
+    ) async {
+      if (!hasNativeTerminal) {
+        return;
+      }
+
+      const widgetCursor = Color(0xFF44D7FF);
+      const cursorText = Color(0xFFFF2200);
+
+      final webLike = _FormatterOnlyController();
+      addTearDown(webLike.dispose);
+      // Every visible column holds a glyph, so this asserts the cursor reveals
+      // whatever it landed on without depending on where that is: with no
+      // engine snapshot the column comes from the formatter's own VT parse.
+      webLike.appendDebugOutput('X' * 200);
+
+      final key = GlobalKey();
+      await tester.pumpWidget(
+        RepaintBoundary(
+          key: key,
+          child: buildView(
+            terminalController: webLike,
+            showHeader: false,
+            autofocus: true,
+            renderer: GhosttyTerminalRendererMode.formatter,
+            backgroundColor: const Color(0xFF112233),
+            foregroundColor: const Color(0xFFE6EDF3),
+            cursorColor: widgetCursor,
+            cursorTextColor: cursorText,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final image = await _captureTerminalImageData(tester, key);
+      expect(
+        _countPixelsNearColor(image, color: cursorText, tolerance: 16),
+        greaterThan(0),
+      );
+    });
+
+    testWidgets('formatter block cursor on a blank cell draws no glyph', (
+      tester,
+    ) async {
+      if (!hasNativeTerminal) {
+        return;
+      }
+
+      const widgetCursor = Color(0xFF44D7FF);
+      const cursorText = Color(0xFFFF2200);
+
+      final webLike = _FormatterOnlyController();
+      addTearDown(webLike.dispose);
+      webLike.appendDebugOutput('abc');
+
+      final key = GlobalKey();
+      await tester.pumpWidget(
+        RepaintBoundary(
+          key: key,
+          child: buildView(
+            terminalController: webLike,
+            showHeader: false,
+            autofocus: true,
+            renderer: GhosttyTerminalRendererMode.formatter,
+            backgroundColor: const Color(0xFF112233),
+            foregroundColor: const Color(0xFFE6EDF3),
+            cursorColor: widgetCursor,
+            cursorTextColor: cursorText,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final image = await _captureTerminalImageData(tester, key);
+      expect(_countPixelsNearColor(image, color: cursorText, tolerance: 16), 0);
     });
 
     testWidgets('formatter prefers the native cursor position when available', (

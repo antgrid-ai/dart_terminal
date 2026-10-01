@@ -108,6 +108,13 @@ const double _terminalHeaderHeight = 28.0;
 /// realistic on-screen color population, so hitting it means pathological
 /// churn — clearing wholesale is then cheaper than tracking recency.
 const int _contrastFloorCacheMaxEntries = 4096;
+
+/// Floor applied to the glyph drawn inside a block cursor when the host set no
+/// [GhosttyTerminalView.cursorTextColor]. Unlike cell text, this floor is never
+/// opt-out: `minimumContrastRatio` null means "leave cell colors alone", but a
+/// cursor whose color lands near the cell background would swallow the glyph
+/// again, which is the one thing this paint exists to prevent.
+const double _cursorTextContrastRatio = 4.5;
 const Set<PointerDeviceKind> _mouseLikePointerDevices = <PointerDeviceKind>{
   PointerDeviceKind.mouse,
   PointerDeviceKind.stylus,
@@ -231,6 +238,7 @@ class GhosttyTerminalView extends StatefulWidget {
     this.minimumContrastRatio,
     this.cursorColor = const Color(0xFF9AD1C0),
     this.unfocusedCursorColor,
+    this.cursorTextColor,
     this.showCursor = true,
     this.selectionColor = const Color(0x665DA9FF),
     this.hyperlinkColor = const Color(0xFF61AFEF),
@@ -422,6 +430,14 @@ class GhosttyTerminalView extends StatefulWidget {
   /// Color of the hollow cursor when keyboard focus is elsewhere.
   /// Defaults to [cursorColor].
   final Color? unfocusedCursorColor;
+
+  /// Color of the glyph re-drawn on top of a filled block cursor, so the
+  /// character under the cursor stays readable instead of being covered.
+  ///
+  /// Defaults to the cell's own background contrast-floored against
+  /// [cursorColor] (Ghostty's `cursor-text` behaviour with a readability
+  /// floor), which keeps the glyph legible whatever the cursor color is.
+  final Color? cursorTextColor;
 
   /// Hides the cursor without changing the guest terminal's cursor mode.
   final bool showCursor;
@@ -3764,6 +3780,7 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
                                 ? widget.cursorColor
                                 : (widget.unfocusedCursorColor ??
                                       widget.cursorColor),
+                            cursorTextColor: widget.cursorTextColor,
                             showCursor: widget.showCursor,
                             selectionColor: widget.selectionColor,
                             hyperlinkColor: widget.hyperlinkColor,
@@ -4221,6 +4238,7 @@ class _GhosttyTerminalPainter extends CustomPainter {
     required this.foregroundColor,
     required this.chromeColor,
     required this.cursorColor,
+    required this.cursorTextColor,
     required this.showCursor,
     required this.selectionColor,
     required this.hyperlinkColor,
@@ -4279,6 +4297,7 @@ class _GhosttyTerminalPainter extends CustomPainter {
   final Color foregroundColor;
   final Color chromeColor;
   final Color cursorColor;
+  final Color? cursorTextColor;
   final bool showCursor;
   final Color selectionColor;
   final Color hyperlinkColor;
@@ -4397,7 +4416,7 @@ class _GhosttyTerminalPainter extends CustomPainter {
         canvas,
         contentTop: contentTop,
         linePixels: linePixels,
-        visibleRows: nativeRender.rowsData.length,
+        rowsData: nativeRender.rowsData,
         cursor: nativeRender.cursor,
         color: cursorColor,
       );
@@ -4602,37 +4621,75 @@ class _GhosttyTerminalPainter extends CustomPainter {
       }
     }
 
-    final cursor = showCursor && scrollOffsetLines == 0
-        ? snapshot.cursor
-        : null;
-    if (cursor != null) {
-      final cursorLine = cursor.row - start;
-      if (cursorLine >= 0 && cursorLine < visible.length) {
-        final cursorRowBand = _rowBand(
-          contentTop: contentTop,
-          rowIndex: cursorLine,
-          linePixels: linePixels,
-          devicePixelRatio: devicePixelRatio,
-        );
-        final cursorRect = Rect.fromLTWH(
-          padding.left + (cursor.col * charWidth),
-          cursorRowBand.top,
-          charWidth,
-          cursorRowBand.height,
-        );
-        if (focused) {
+    // The formatter transcript carries screen contents, not a cursor position,
+    // so `snapshot.cursor` is only ever "where the VT parse stopped" — the end
+    // of the last emitted cell. Prefer the engine's real cursor whenever there
+    // is one, and fall back to the parsed position only where no engine exists
+    // (web). Both index the visible window from its top, which is why this is
+    // gated on being scrolled to the bottom.
+    if (showCursor &&
+        scrollOffsetLines == 0 &&
+        nativeRender != null &&
+        nativeRender.hasViewportData) {
+      _paintNativeCursor(
+        canvas,
+        contentTop: contentTop,
+        linePixels: linePixels,
+        rowsData: nativeRender.rowsData,
+        cursor: nativeRender.cursor,
+        color: cursorColor,
+      );
+    } else if (showCursor && scrollOffsetLines == 0) {
+      final cursor = snapshot.cursor;
+      if (cursor != null) {
+        final cursorLine = cursor.row - start;
+        if (cursorLine >= 0 && cursorLine < visible.length) {
+          final cursorRowBand = _rowBand(
+            contentTop: contentTop,
+            rowIndex: cursorLine,
+            linePixels: linePixels,
+            devicePixelRatio: devicePixelRatio,
+          );
+          final line = visible[cursorLine];
+          // The formatter snapshot reports no wide-cell state for the cursor,
+          // so measure the grapheme it sits on: a block covering half a wide
+          // glyph reads as a rendering fault, and the inverted glyph needs the
+          // whole cell to land in. Matches renderState's `onWideTail` span.
+          final cursorText = line.textForCellRange(cursor.col, cursor.col);
+          final cursorCells =
+              cursorText.runes.isNotEmpty && _isWideRune(cursorText.runes.first)
+              ? 2
+              : 1;
+          final cursorRect = Rect.fromLTWH(
+            padding.left + (cursor.col * charWidth),
+            cursorRowBand.top,
+            charWidth * cursorCells,
+            cursorRowBand.height,
+          );
+          if (focused) {
+            // Opaque enough that the glyph painted underneath does not ghost
+            // through the one drawn on top of it, and the same body alpha the
+            // renderState block cursor uses.
+            final fill = cursorColor.withValues(alpha: 0.95);
+            canvas.drawRect(cursorRect, Paint()..color = fill);
+            _paintFormatterCursorGlyph(
+              canvas,
+              cellRect: cursorRect,
+              line: line,
+              column: cursor.col,
+              text: cursorText,
+              cells: cursorCells,
+              cursorFill: fill,
+            );
+          }
           canvas.drawRect(
-            cursorRect,
-            Paint()..color = cursorColor.withValues(alpha: 0.78),
+            cursorRect.deflate(0.5),
+            Paint()
+              ..color = cursorColor.withValues(alpha: focused ? 1 : 0.88)
+              ..style = PaintingStyle.stroke
+              ..strokeWidth = 1,
           );
         }
-        canvas.drawRect(
-          cursorRect.deflate(0.5),
-          Paint()
-            ..color = cursorColor.withValues(alpha: focused ? 1 : 0.88)
-            ..style = PaintingStyle.stroke
-            ..strokeWidth = 1,
-        );
       }
     }
     canvas.restore();
@@ -4673,6 +4730,7 @@ class _GhosttyTerminalPainter extends CustomPainter {
         foregroundColor != oldDelegate.foregroundColor ||
         chromeColor != oldDelegate.chromeColor ||
         cursorColor != oldDelegate.cursorColor ||
+        cursorTextColor != oldDelegate.cursorTextColor ||
         showCursor != oldDelegate.showCursor ||
         selectionColor != oldDelegate.selectionColor ||
         hyperlinkColor != oldDelegate.hyperlinkColor ||
@@ -4952,7 +5010,7 @@ class _GhosttyTerminalPainter extends CustomPainter {
     Canvas canvas, {
     required double contentTop,
     required double linePixels,
-    required int visibleRows,
+    required List<GhosttyTerminalRenderRow> rowsData,
     required GhosttyTerminalRenderCursor cursor,
     required Color color,
   }) {
@@ -4963,7 +5021,7 @@ class _GhosttyTerminalPainter extends CustomPainter {
         cursor.col == null) {
       return;
     }
-    if (cursor.row! < 0 || cursor.row! >= visibleRows) {
+    if (cursor.row! < 0 || cursor.row! >= rowsData.length) {
       return;
     }
     if (cursor.col! < 0 || cursor.col! >= cols) {
@@ -5056,6 +5114,8 @@ class _GhosttyTerminalPainter extends CustomPainter {
           .GHOSTTY_RENDER_STATE_CURSOR_VISUAL_STYLE_UNDERLINE:
       case GhosttyRenderStateCursorVisualStyle
           .GHOSTTY_RENDER_STATE_CURSOR_VISUAL_STYLE_BAR:
+        canvas.drawRect(shapeRect, fillPaint);
+        canvas.drawRect(shapeRect, strokePaint);
       case GhosttyRenderStateCursorVisualStyle
           .GHOSTTY_RENDER_STATE_CURSOR_VISUAL_STYLE_BLOCK:
       // MAX_VALUE is an ABI width sentinel, never a real style; fall in with
@@ -5064,7 +5124,192 @@ class _GhosttyTerminalPainter extends CustomPainter {
           .GHOSTTY_RENDER_STATE_CURSOR_VISUAL_STYLE_MAX_VALUE:
         canvas.drawRect(shapeRect, fillPaint);
         canvas.drawRect(shapeRect, strokePaint);
+        // A solid block covers the glyph that `_paintNativeRenderState`
+        // already drew, so draw it again on top of the cursor body.
+        _paintNativeCursorGlyph(
+          canvas,
+          cellRect: shapeRect,
+          row: rowsData[cursor.row!],
+          column: startCol,
+          cursorFill: drawColor,
+        );
     }
+  }
+
+  /// Re-draws the character underneath a filled block cursor so the cursor
+  /// reveals it instead of swallowing it — Ghostty's `cursor-text`, with a
+  /// readability floor applied to the default (the cell's own background).
+  ///
+  /// [cellRect] is the rect the cursor body was filled with, and doubles as
+  /// the clip so an oversized fallback glyph cannot bleed past the cursor it
+  /// is inverted against.
+  void _paintNativeCursorGlyph(
+    Canvas canvas, {
+    required Rect cellRect,
+    required GhosttyTerminalRenderRow row,
+    required int column,
+    required Color cursorFill,
+  }) {
+    final nativeRender = renderSnapshot;
+    if (nativeRender == null) {
+      return;
+    }
+    final cell = _cellAtColumn(row, column);
+    if (cell == null || cell.style.invisible || cell.text.trim().isEmpty) {
+      return;
+    }
+    _paintCursorGlyph(
+      canvas,
+      text: cell.text,
+      cellRect: cellRect,
+      cells: cell.width,
+      color: _cursorGlyphColor(
+        cellBackground: _resolvedNativeBackground(
+          metadataColor: _resolveMetadataBackgroundColor(
+            metadata: cell.metadata,
+          ),
+          style: cell.style,
+          defaultForeground: foregroundColor,
+          defaultBackground: backgroundColor,
+          nativeDefaultForeground: nativeRender.foregroundColor,
+          nativeDefaultBackground: nativeRender.backgroundColor,
+        ),
+        cursorFill: cursorFill,
+      ),
+      fontWeight: cell.style.bold ? boldFontWeight : fontWeight,
+      fontStyle: cell.style.italic ? FontStyle.italic : FontStyle.normal,
+    );
+  }
+
+  /// The formatter path's counterpart to [_paintNativeCursorGlyph]. Its cursor
+  /// is always a block, so the same rule applies: whatever the block covered
+  /// gets drawn again on top in a contrasting color.
+  void _paintFormatterCursorGlyph(
+    Canvas canvas, {
+    required Rect cellRect,
+    required GhosttyTerminalLine line,
+    required int column,
+    required String text,
+    required int cells,
+    required Color cursorFill,
+  }) {
+    final run = line.runAtCell(column);
+    if (run == null || run.style.invisible || text.trim().isEmpty) {
+      return;
+    }
+    // The formatter path resolves colors through `_ResolvedTerminalStyle`
+    // (palette-driven), not the engine's per-cell colors, so the cursor glyph
+    // has to take its weight, slant and cell background from there too.
+    final style = _ResolvedTerminalStyle.fromRun(
+      run.style,
+      palette: palette,
+      defaultForeground: foregroundColor,
+      defaultBackground: backgroundColor,
+      hyperlinkColor: hyperlinkColor,
+    );
+    _paintCursorGlyph(
+      canvas,
+      text: text,
+      cellRect: cellRect,
+      cells: cells,
+      color: _cursorGlyphColor(
+        cellBackground: style.background,
+        cursorFill: cursorFill,
+      ),
+      fontWeight: style.fontWeight,
+      fontStyle: style.fontStyle,
+    );
+  }
+
+  /// Color for a glyph drawn inside a cursor body filled with [cursorFill].
+  ///
+  /// Defaults to the cell's own background — Ghostty's `cursor-text` — floored
+  /// for readability against the fill. The fill is painted at <1 alpha, so the
+  /// floor is measured against what actually lands on screen rather than the
+  /// nominal cursor color.
+  Color _cursorGlyphColor({
+    required Color cellBackground,
+    required Color cursorFill,
+  }) {
+    // Both renderers spell "this cell has no background of its own" as zero
+    // alpha (`Colors.transparent` in the renderState resolver, an untouched
+    // default in the formatter one), so test the alpha rather than the color.
+    final effective = cellBackground.a == 0 ? backgroundColor : cellBackground;
+    return cursorTextColor ??
+        _flooredForeground(
+          effective,
+          Color.alphaBlend(cursorFill, effective),
+          minimumContrastRatio ?? _cursorTextContrastRatio,
+        );
+  }
+
+  /// Paints one grapheme over a cursor body, clipped to [cellRect].
+  ///
+  /// Shared by both renderers' block cursors. Placement matches the run
+  /// painters: the glyph is left-aligned on the row baseline (`height`
+  /// positions the baseline inside the line box) so it lands exactly on top of
+  /// the glyph it replaces, and only an oversized fallback glyph — one that
+  /// measures wider than its own cell — is centered instead.
+  void _paintCursorGlyph(
+    Canvas canvas, {
+    required String text,
+    required Rect cellRect,
+    required int cells,
+    required Color color,
+    required FontWeight fontWeight,
+    required FontStyle fontStyle,
+  }) {
+    canvas.save();
+    canvas.clipRect(cellRect);
+    // The custom-painted glyphs are all drawn to fill a single cell, so a wide
+    // grapheme goes to the font, exactly as in the run painters.
+    final drewSpecialGlyph =
+        cells <= 1 &&
+        _paintTerminalSpecialGlyph(canvas, text, rect: cellRect, color: color);
+    if (!drewSpecialGlyph) {
+      final painter = nativeRunPainterCache.resolve(
+        _TerminalTextPainterKey(
+          text: text,
+          // Unconstrained, like the run painters' per-glyph fallback: an
+          // oversized fallback glyph has to measure wider than its cell for
+          // the centering below to notice it.
+          width: double.infinity,
+          fontSize: fontSize,
+          lineHeight: linePixels / fontSize,
+          fontFamily: fontFamily,
+          fontFamilyFallback: fontFamilyFallback,
+          fontPackage: fontPackage,
+          letterSpacing: 0,
+          color: color,
+          fontWeight: fontWeight,
+          fontStyle: fontStyle,
+          decoration: TextDecoration.none,
+          decorationStyle: TextDecorationStyle.solid,
+          decorationColor: color,
+        ),
+      );
+      final glyphX = painter.width > cellRect.width
+          ? cellRect.left + ((cellRect.width - painter.width) / 2)
+          : cellRect.left;
+      painter.paint(canvas, Offset(glyphX, cellRect.top));
+    }
+    canvas.restore();
+  }
+
+  /// The cell occupying [column], accounting for wide cells spanning two
+  /// columns (`cells` holds one entry per grapheme, not per column).
+  GhosttyTerminalRenderCell? _cellAtColumn(
+    GhosttyTerminalRenderRow row,
+    int column,
+  ) {
+    var current = 0;
+    for (final cell in row.cells) {
+      if (column < current + cell.width) {
+        return cell;
+      }
+      current += cell.width;
+    }
+    return null;
   }
 
   /// Extends the background color of the grid's edge cells into the padding
