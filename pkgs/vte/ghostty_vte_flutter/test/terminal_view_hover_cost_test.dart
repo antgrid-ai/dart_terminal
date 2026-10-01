@@ -82,9 +82,7 @@ Future<void> expectHoverStaysCheap(
   controller.appendOutputBytes(utf8.encode(scrollback.toString()));
   await tester.pumpAndSettle();
 
-  final gesture = await tester.createGesture(
-    kind: ui.PointerDeviceKind.mouse,
-  );
+  final gesture = await tester.createGesture(kind: ui.PointerDeviceKind.mouse);
   await gesture.addPointer(location: Offset.zero);
   addTearDown(gesture.removePointer);
   await tester.pump();

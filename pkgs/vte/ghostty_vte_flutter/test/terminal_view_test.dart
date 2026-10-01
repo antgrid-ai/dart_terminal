@@ -1675,30 +1675,31 @@ void main() {
 
       // A soft-wrapped line is one logical line, so the line cap never cuts a
       // long path that merely wraps at the window edge.
-      testWidgets('quiet hover underline follows a soft-wrapped path to its end', (
-        tester,
-      ) async {
-        if (!hasNativeTerminal) {
-          return;
-        }
+      testWidgets(
+        'quiet hover underline follows a soft-wrapped path to its end',
+        (tester) async {
+          if (!hasNativeTerminal) {
+            return;
+          }
 
-        final view = await pumpNarrowLinked(tester, link(pathUri, 'x' * 120));
-        final mouse = await startMouse(tester);
-        for (final hoverRow in [0, 3, 5]) {
-          expect(
-            await underlinedRowsFrom(
-              tester,
-              mouse,
-              view.key,
-              view.m,
-              hoverRow: hoverRow,
-              rows: 7,
-            ),
-            [0, 1, 2, 3, 4, 5],
-            reason: 'hovering row $hoverRow',
-          );
-        }
-      });
+          final view = await pumpNarrowLinked(tester, link(pathUri, 'x' * 120));
+          final mouse = await startMouse(tester);
+          for (final hoverRow in [0, 3, 5]) {
+            expect(
+              await underlinedRowsFrom(
+                tester,
+                mouse,
+                view.key,
+                view.m,
+                hoverRow: hoverRow,
+                rows: 7,
+              ),
+              [0, 1, 2, 3, 4, 5],
+              reason: 'hovering row $hoverRow',
+            );
+          }
+        },
+      );
 
       testWidgets('quiet hover underline joins at most three hard lines', (
         tester,
@@ -1796,9 +1797,8 @@ void main() {
         controller.appendDebugOutput(
           List<String>.generate(
             120,
-            (i) => i.isEven
-                ? link(pathUri, 'q' * 6)
-                : link(programUri, 'a' * 12),
+            (i) =>
+                i.isEven ? link(pathUri, 'q' * 6) : link(programUri, 'a' * 12),
           ).join('\r\n'),
         );
         final scrollController = ScrollController();
