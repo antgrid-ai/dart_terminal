@@ -8193,13 +8193,15 @@ abstract final class _LinkClass {
       linkClass == accent || linkClass == quietHovered;
 }
 
-/// Mirrors the bridge's hard-wrap join rule for detected paths, which carries
-/// one URI on every row it spans: a row's block continues onto the next when
-/// its exclusive end column is within this many columns of the right edge, and
-/// a path spans at most [_kLinkMaxJoinedRows] rows. Keep both in step with the
-/// bridge's WRAP_EDGE_SLACK and MAX_JOINED_PATH_LINES.
+/// Mirrors the bridge's join rule for detected paths, which carries one URI on
+/// every row it spans: a row's block continues onto the next when its
+/// exclusive end column is within this many columns of the right edge, and a
+/// path spans at most [_kLinkMaxJoinedLines] logical lines. A soft-wrapped
+/// line is one logical line however many rows it takes, so only hard breaks
+/// count. Keep both in step with the bridge's WRAP_EDGE_SLACK and
+/// MAX_JOINED_PATH_LINES.
 const int _kLinkWrapEdgeSlack = 4;
-const int _kLinkMaxJoinedRows = 3;
+const int _kLinkMaxJoinedLines = 3;
 
 /// A maximal run of same-URI hyperlink cells on one row. [end] is exclusive.
 final class _LinkBlock {
@@ -8238,7 +8240,8 @@ final class _LinkSpan {
 
 /// The cells a hover on [cell] underlines: the same-URI block under it, joined
 /// onto neighbouring rows by the bridge's rule. [blocksAt] answers for an
-/// absolute row, null where the row is outside what is known or has no links.
+/// absolute row, null where the row is outside what is known or has no links;
+/// [softWrapsAfter] says whether a row soft-wraps into the next one.
 /// Null when [cell] is not on a quiet link carrying [hoveredUri], which also
 /// covers content that changed under a pointer that has not moved.
 _LinkSpan? _joinedLinkSpan({
@@ -8246,6 +8249,7 @@ _LinkSpan? _joinedLinkSpan({
   required String hoveredUri,
   required int cols,
   required List<_LinkBlock>? Function(int row) blocksAt,
+  required bool Function(int row) softWrapsAfter,
 }) {
   final rowBlocks = blocksAt(cell.row);
   if (rowBlocks == null) {
@@ -8278,13 +8282,21 @@ _LinkSpan? _joinedLinkSpan({
   final parts = <({int row, int start, int end})>[
     (row: cell.row, start: hit.start, end: hit.end),
   ];
+  // The walk is bounded by the rows [blocksAt] knows about, not by a row cap.
+  var lines = 1;
   var forwardRow = cell.row;
   var forward = hit;
-  while (parts.length < _kLinkMaxJoinedRows &&
-      forward.end >= cols - _kLinkWrapEdgeSlack) {
+  while (forward.end >= cols - _kLinkWrapEdgeSlack) {
+    final hardBreak = !softWrapsAfter(forwardRow);
+    if (hardBreak && lines >= _kLinkMaxJoinedLines) {
+      break;
+    }
     final next = sameUri(blocksAt(forwardRow + 1), last: false);
     if (next == null) {
       break;
+    }
+    if (hardBreak) {
+      lines++;
     }
     forwardRow++;
     forward = next;
@@ -8293,11 +8305,18 @@ _LinkSpan? _joinedLinkSpan({
 
   var backwardRow = cell.row;
   var backwardIndex = hitIndex;
-  while (parts.length < _kLinkMaxJoinedRows && backwardIndex == 0) {
+  while (backwardIndex == 0) {
+    final hardBreak = !softWrapsAfter(backwardRow - 1);
+    if (hardBreak && lines >= _kLinkMaxJoinedLines) {
+      break;
+    }
     final previousBlocks = blocksAt(backwardRow - 1);
     final previous = sameUri(previousBlocks, last: true);
     if (previous == null || previous.end < cols - _kLinkWrapEdgeSlack) {
       break;
+    }
+    if (hardBreak) {
+      lines++;
     }
     backwardRow--;
     backwardIndex = previousBlocks!.indexOf(previous);
@@ -8323,6 +8342,7 @@ final class _LinkClassMemo {
   int _rows = -1;
   Object? _predicate;
   List<List<_LinkBlock>?> _blocks = const <List<_LinkBlock>?>[];
+  List<bool> _wraps = const <bool>[];
   int _blocksVersion = 0;
 
   int _classesBlocksVersion = -1;
@@ -8401,6 +8421,8 @@ final class _LinkClassMemo {
       hoveredUri: hoveredUri,
       cols: cols,
       blocksAt: blocksAt,
+      softWrapsAfter: (row) =>
+          row >= 0 && row < snapshot.lines.length && snapshot.lines[row].wrap,
     );
   }
 
@@ -8488,6 +8510,7 @@ final class _LinkClassMemo {
       blocks[r] = rowBlocks;
     }
     _blocks = blocks;
+    _wraps = [for (final row in rowsData) row.wrap];
   }
 
   /// The span a hover on [cell] underlines, or null when the cell is not on a
@@ -8506,6 +8529,10 @@ final class _LinkClassMemo {
       blocksAt: (row) {
         final r = row - startLine;
         return r < 0 || r >= _blocks.length ? null : _blocks[r];
+      },
+      softWrapsAfter: (row) {
+        final r = row - startLine;
+        return r >= 0 && r < _wraps.length && _wraps[r];
       },
     );
   }

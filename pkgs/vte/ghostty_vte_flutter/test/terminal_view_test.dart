@@ -1633,24 +1633,16 @@ void main() {
         expect(diffCells(baseline, hovered, m, toCol: 8), greaterThan(0));
       });
 
-      testWidgets('quiet hover underline spans at most three rows', (
-        tester,
+      Future<({GlobalKey key, _TestMetrics m})> pumpNarrowLinked(
+        WidgetTester tester,
+        String output,
       ) async {
-        if (!hasNativeTerminal) {
-          return;
-        }
-
         await tester.pumpWidget(buildView(showHeader: false));
         await tester.pump();
         final m = _measureTestMetrics();
-
-        // Four full rows of one link: every row ends at the right edge, so
-        // only the row cap stops the join.
         final linked = GhosttyTerminalController();
         addTearDown(linked.dispose);
-        linked.appendDebugOutput(
-          '$underlineColour${link(pathUri, 'x' * 80)}',
-        );
+        linked.appendDebugOutput('$underlineColour$output');
         final key = await pumpQuietView(
           tester,
           terminalController: linked,
@@ -1658,33 +1650,134 @@ void main() {
           width: (2 * m.padding + 20 * m.charWidth + 1).toDouble(),
         );
         expect(linked.cols, 20);
+        return (key: key, m: m);
+      }
 
+      Future<List<int>> underlinedRowsFrom(
+        WidgetTester tester,
+        TestGesture mouse,
+        GlobalKey key,
+        _TestMetrics m, {
+        required int hoverRow,
+        required int rows,
+      }) async {
         final baseline = await _captureTerminalImageData(tester, key);
+        await mouse.moveTo(cellCentre(m, 5, hoverRow));
+        await tester.pumpAndSettle();
+        final hovered = await _captureTerminalImageData(tester, key);
+        await mouse.moveTo(outsideView);
+        await tester.pumpAndSettle();
+        return [
+          for (var row = 0; row < rows; row++)
+            if (diffCells(baseline, hovered, m, row: row, toCol: 20) > 0) row,
+        ];
+      }
+
+      // A soft-wrapped line is one logical line, so the line cap never cuts a
+      // long path that merely wraps at the window edge.
+      testWidgets('quiet hover underline follows a soft-wrapped path to its end', (
+        tester,
+      ) async {
+        if (!hasNativeTerminal) {
+          return;
+        }
+
+        final view = await pumpNarrowLinked(tester, link(pathUri, 'x' * 120));
         final mouse = await startMouse(tester);
-
-        await mouse.moveTo(cellCentre(m, 5, 0));
-        await tester.pumpAndSettle();
-        final fromFirst = await _captureTerminalImageData(tester, key);
-        for (var row = 0; row < 3; row++) {
+        for (final hoverRow in [0, 3, 5]) {
           expect(
-            diffCells(baseline, fromFirst, m, row: row, toCol: 20),
-            greaterThan(0),
-            reason: 'row $row should be underlined',
+            await underlinedRowsFrom(
+              tester,
+              mouse,
+              view.key,
+              view.m,
+              hoverRow: hoverRow,
+              rows: 7,
+            ),
+            [0, 1, 2, 3, 4, 5],
+            reason: 'hovering row $hoverRow',
           );
         }
-        expect(diffCells(baseline, fromFirst, m, row: 3, toCol: 20), 0);
+      });
 
-        await mouse.moveTo(cellCentre(m, 5, 3));
-        await tester.pumpAndSettle();
-        final fromLast = await _captureTerminalImageData(tester, key);
-        for (var row = 1; row < 4; row++) {
-          expect(
-            diffCells(baseline, fromLast, m, row: row, toCol: 20),
-            greaterThan(0),
-            reason: 'row $row should be underlined',
-          );
+      testWidgets('quiet hover underline joins at most three hard lines', (
+        tester,
+      ) async {
+        if (!hasNativeTerminal) {
+          return;
         }
-        expect(diffCells(baseline, fromLast, m, row: 0, toCol: 20), 0);
+
+        // Four full rows of one link split by hard breaks: every row ends at
+        // the right edge, so only the line cap stops the join.
+        final view = await pumpNarrowLinked(
+          tester,
+          List<String>.filled(4, link(pathUri, 'x' * 20)).join('\r\n'),
+        );
+        final mouse = await startMouse(tester);
+        expect(
+          await underlinedRowsFrom(
+            tester,
+            mouse,
+            view.key,
+            view.m,
+            hoverRow: 0,
+            rows: 5,
+          ),
+          [0, 1, 2],
+        );
+        expect(
+          await underlinedRowsFrom(
+            tester,
+            mouse,
+            view.key,
+            view.m,
+            hoverRow: 3,
+            rows: 5,
+          ),
+          [1, 2, 3],
+        );
+      });
+
+      testWidgets('quiet hover underline counts a soft-wrapped line once '
+          'against the hard-line cap', (tester) async {
+        if (!hasNativeTerminal) {
+          return;
+        }
+
+        // Rows 0-1 are one soft-wrapped line; rows 2, 3 and 4 are one hard
+        // line each. Three logical lines from row 0 reach row 3, not row 4.
+        final view = await pumpNarrowLinked(
+          tester,
+          [
+            link(pathUri, 'x' * 40),
+            link(pathUri, 'x' * 20),
+            link(pathUri, 'x' * 20),
+            link(pathUri, 'x' * 20),
+          ].join('\r\n'),
+        );
+        final mouse = await startMouse(tester);
+        expect(
+          await underlinedRowsFrom(
+            tester,
+            mouse,
+            view.key,
+            view.m,
+            hoverRow: 0,
+            rows: 6,
+          ),
+          [0, 1, 2, 3],
+        );
+        expect(
+          await underlinedRowsFrom(
+            tester,
+            mouse,
+            view.key,
+            view.m,
+            hoverRow: 4,
+            rows: 6,
+          ),
+          [2, 3, 4],
+        );
       });
 
       // The scroll layer moves before the engine does, so for a frame the
