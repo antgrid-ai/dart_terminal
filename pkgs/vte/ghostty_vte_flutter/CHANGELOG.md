@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Added optional mouse-motion coalescing with `mouseMotionReportInterval` and
+  explicit flush/cancellation hooks for host lifecycle changes.
+- Preserved cell deduplication across motion reports and kept non-motion input
+  immediate while retaining input order.
+
 ## 0.1.4
 
 - Updated `ghostty_vte` to `^0.1.4` and `portable_pty` to `^0.0.6`.

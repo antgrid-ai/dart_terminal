@@ -1003,7 +1003,11 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
   @override
   void didUpdateWidget(covariant GhosttyTerminalView oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (oldWidget.interactionPolicy != widget.interactionPolicy) {
+      widget.controller.cancelPendingMouseMotion();
+    }
     if (oldWidget.controller != widget.controller) {
+      oldWidget.controller.cancelPendingMouseMotion();
       _pendingEngineOffset = null;
       _pendingFlutterOffset = null;
       oldWidget.controller.removeListener(_onControllerChanged);
@@ -1087,6 +1091,7 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
 
   @override
   void dispose() {
+    widget.controller.cancelPendingMouseMotion();
     _removeSelectionContextMenu();
     _stopAutoScroll();
     _detachSoftKeyboardController(widget.softKeyboardController);
@@ -1432,6 +1437,7 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
       return;
     }
     if (!_terminalMouseReportingCapturesPointerKind(event.kind)) {
+      widget.controller.cancelPendingMouseMotion();
       return;
     }
     // Primary only: a program that has the mouse still owns its right- and
@@ -2406,6 +2412,7 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
         (action == GhosttyMouseAction.GHOSTTY_MOUSE_ACTION_PRESS ||
             action == GhosttyMouseAction.GHOSTTY_MOUSE_ACTION_RELEASE ||
             event.buttons != 0)) {
+      widget.controller.cancelPendingMouseMotion();
       return;
     }
 

@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/painting.dart';
 import 'package:ghostty_vte/ghostty_vte.dart';
 
+import 'mouse_input.dart';
 import 'pty_session.dart';
 import 'shell_launch.dart';
 import 'terminal_render_model.dart';
@@ -24,7 +25,9 @@ class GhosttyTerminalController extends ChangeNotifier
     this.initialRows = 24,
     this.preferPty = true,
     this.defaultShell,
-  }) : assert(maxLines > 0),
+    this.mouseMotionReportInterval = Duration.zero,
+  }) : assert(!mouseMotionReportInterval.isNegative),
+       assert(maxLines > 0),
        assert(maxScrollback >= 0),
        assert(initialCols > 0),
        assert(initialRows > 0),
@@ -50,11 +53,26 @@ class GhosttyTerminalController extends ChangeNotifier
   /// Optional shell hint for remote backends.
   final String? defaultShell;
 
+  /// Minimum spacing between motion reports, with the latest position retained.
+  /// Non-motion input flushes pending motion immediately to preserve ordering.
+  final Duration mouseMotionReportInterval;
+
+  late final _mouseInput = MouseInput(
+    interval: mouseMotionReportInterval,
+    readModes: () => terminalMouseModes(_terminal),
+    writeBytes: (bytes) => _running && _writeBytes(bytes),
+  );
+
+  /// Drops deferred motion when its view or transport is no longer eligible.
+  void cancelPendingMouseMotion() => _mouseInput.cancel();
+
+  /// Sends the latest deferred position before another user input.
+  void flushPendingMouseMotion() => _mouseInput.flush();
+
   VtTerminal? _terminal;
   VtTerminalFormatter? _plainFormatter;
   VtTerminalFormatter? _styledFormatter;
   VtKeyEncoder? _encoder;
-  VtMouseEncoder? _mouseEncoder;
   GhosttyTerminalShellLaunch? _activeShellLaunch;
   bool Function(List<int> bytes)? _externalWriteBytes;
   void Function(int cols, int rows, int cellWidthPx, int cellHeightPx)?
@@ -263,6 +281,7 @@ class GhosttyTerminalController extends ChangeNotifier
     GhosttyTerminalShellLaunch? launch,
     bool forwardGuestQueryReplies = true,
   }) {
+    cancelPendingMouseMotion();
     _ensureTerminal();
     _externalWriteBytes = writeBytes;
     _externalResize = onResize;
@@ -283,6 +302,7 @@ class GhosttyTerminalController extends ChangeNotifier
 
   /// Detach any external transport backend.
   void detachExternalTransport() {
+    cancelPendingMouseMotion();
     _externalWriteBytes = null;
     _externalResize = null;
   }
@@ -292,12 +312,14 @@ class GhosttyTerminalController extends ChangeNotifier
     if (bytes.isEmpty) return;
     _consumeOscText(utf8.decode(bytes, allowMalformed: true));
     _ensureTerminal().writeBytes(bytes);
+    _mouseInput.synchronizeModes();
     _refreshSnapshot();
     _markDirty();
   }
 
   /// Update the running state for an external transport session.
   void setSessionRunning(bool running) {
+    if (!running) cancelPendingMouseMotion();
     _running = running;
     _markDirty();
   }
@@ -305,7 +327,9 @@ class GhosttyTerminalController extends ChangeNotifier
   /// Web stub: focus reporting is a native-only concern (the web engine has no
   /// external PTY transport). Present so the cross-platform controller surface
   /// matches `terminal_controller_native.dart`.
-  void setFocused(bool focused) {}
+  void setFocused(bool focused) {
+    if (!focused) cancelPendingMouseMotion();
+  }
 
   /// Web stub for interface parity — the web controller does not track focus
   /// intent (see [setFocused]).
@@ -344,6 +368,7 @@ class GhosttyTerminalController extends ChangeNotifier
 
   /// Marks the remote session inactive without clearing terminal contents.
   Future<void> stop() async {
+    cancelPendingMouseMotion();
     if (!_running) {
       return;
     }
@@ -353,6 +378,7 @@ class GhosttyTerminalController extends ChangeNotifier
 
   /// Clears terminal contents and scrollback while preserving dimensions.
   void clear() {
+    cancelPendingMouseMotion();
     final terminal = _terminal;
     if (terminal == null) {
       _lines
@@ -382,6 +408,7 @@ class GhosttyTerminalController extends ChangeNotifier
       return;
     }
 
+    cancelPendingMouseMotion();
     _cols = checkedCols;
     _rows = checkedRows;
 
@@ -409,6 +436,7 @@ class GhosttyTerminalController extends ChangeNotifier
   /// When [sanitizePaste] is true, unsafe multi-line paste payloads are rejected.
   @override
   bool write(String text, {bool sanitizePaste = false}) {
+    flushPendingMouseMotion();
     if (!_running) {
       return false;
     }
@@ -425,6 +453,12 @@ class GhosttyTerminalController extends ChangeNotifier
   /// Forwards already-encoded bytes to the remote transport abstraction.
   @override
   bool writeBytes(List<int> bytes) {
+    flushPendingMouseMotion();
+    return _writeBytes(bytes);
+  }
+
+  bool _writeBytes(List<int> bytes) {
+    if (bytes.isEmpty) return false;
     if (!_running) {
       return false;
     }
@@ -472,6 +506,7 @@ class GhosttyTerminalController extends ChangeNotifier
   }
 
   /// Encodes a mouse event using Ghostty's mouse protocol rules.
+  /// A true motion result may mean the latest position is queued for delivery.
   bool sendMouse({
     required GhosttyMouseAction action,
     GhosttyMouseButton? button,
@@ -487,36 +522,34 @@ class GhosttyTerminalController extends ChangeNotifier
       return false;
     }
 
-    _mouseEncoder ??= VtMouseEncoder();
-    final terminal = _terminal;
-    if (terminal != null) {
-      _mouseEncoder!.setOptionsFromTerminal(terminal);
-    }
-    if (trackingMode != null ||
+    final modes = terminalMouseModes(_terminal);
+    final hasOverrides =
+        trackingMode != null ||
         format != null ||
         anyButtonPressed != null ||
-        trackLastCell != null) {
-      VtMouseEncoderOptions(
+        trackLastCell != null;
+    return _mouseInput.send(
+      MouseReport(
+        action: action,
+        button: button,
+        mods: mods,
+        position: position,
+        size: size,
+        modes: modes,
         trackingMode:
             trackingMode ??
-            GhosttyMouseTrackingMode.GHOSTTY_MOUSE_TRACKING_NORMAL,
-        format: format ?? GhosttyMouseFormat.GHOSTTY_MOUSE_FORMAT_SGR,
-        size: size,
+            (hasOverrides
+                ? GhosttyMouseTrackingMode.GHOSTTY_MOUSE_TRACKING_NORMAL
+                : modes.$1),
+        format:
+            format ??
+            (hasOverrides
+                ? GhosttyMouseFormat.GHOSTTY_MOUSE_FORMAT_SGR
+                : modes.$2),
         anyButtonPressed: anyButtonPressed ?? false,
         trackLastCell: trackLastCell ?? true,
-      ).applyTo(_mouseEncoder!);
-    } else {
-      _mouseEncoder!.size = size;
-    }
-
-    final event = VtMouseEvent()
-      ..action = action
-      ..button = button
-      ..mods = mods
-      ..position = position;
-    final encoded = _mouseEncoder!.encode(event);
-    event.close();
-    return encoded.isNotEmpty && writeBytes(encoded);
+      ),
+    );
   }
 
   /// Injects decoded terminal output directly into the VT model.
@@ -529,6 +562,7 @@ class GhosttyTerminalController extends ChangeNotifier
     }
     _consumeOscText(text);
     _ensureTerminal().write(text);
+    _mouseInput.synchronizeModes();
     _refreshSnapshot();
     _markDirty();
   }
@@ -590,8 +624,8 @@ class GhosttyTerminalController extends ChangeNotifier
 
   @override
   void dispose() {
+    _mouseInput.dispose();
     _encoder?.close();
-    _mouseEncoder?.close();
     _styledFormatter?.close();
     _plainFormatter?.close();
     _terminal?.close();
