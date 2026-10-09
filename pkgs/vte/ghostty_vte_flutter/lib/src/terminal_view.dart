@@ -5175,7 +5175,27 @@ class _GhosttyTerminalPainter extends CustomPainter {
                       canvas,
                       character,
                       rect: cellRect,
-                      color: textForeground,
+                      // Block elements are graphics: their foreground often
+                      // matches a neighbouring cell's background (TUI borders).
+                      // A text contrast floor would turn that fill into a stripe.
+                      color:
+                          character.runes.length == 1 &&
+                              _terminalBlockGlyphSpec(character.runes.first) !=
+                                  null
+                          ? _resolveNativeForeground(
+                              style: run.style,
+                              defaultForeground: defaultForeground,
+                              defaultBackground: defaultBackground,
+                              nativeDefaultForeground: nativeDefaultForeground,
+                              nativeDefaultBackground: nativeDefaultBackground,
+                              metadataColor: _resolveMetadataBackgroundColor(
+                                metadata: run.metadata,
+                                fallback: run.metadataBackground,
+                              ),
+                              hasHyperlink: run.linkClass == _LinkClass.accent,
+                              applyContrast: false,
+                            )
+                          : textForeground,
                     )) {
                   textX += cellWidth;
                   continue;
@@ -5880,6 +5900,7 @@ class _GhosttyTerminalPainter extends CustomPainter {
     required Color nativeDefaultBackground,
     Color? metadataColor,
     required bool hasHyperlink,
+    bool applyContrast = true,
   }) {
     final resolved = _resolveNativeStyleColors(
       style: style,
@@ -5888,10 +5909,11 @@ class _GhosttyTerminalPainter extends CustomPainter {
       nativeDefaultForeground: nativeDefaultForeground,
       nativeDefaultBackground: nativeDefaultBackground,
       metadataColor: metadataColor,
+      applyContrast: applyContrast,
     );
     if (hasHyperlink && !style.hasExplicitForeground) {
       final ratio = minimumContrastRatio;
-      if (ratio == null || style.invisible) {
+      if (!applyContrast || ratio == null || style.invisible) {
         return hyperlinkColor;
       }
       // The hyperlink override replaces the already-floored resolved
@@ -5914,6 +5936,7 @@ class _GhosttyTerminalPainter extends CustomPainter {
     required Color nativeDefaultForeground,
     required Color nativeDefaultBackground,
     Color? metadataColor,
+    bool applyContrast = true,
   }) {
     final resolved = GhosttyTerminalResolvedStyle.resolveNativeStyleColors(
       style: style,
@@ -5933,7 +5956,7 @@ class _GhosttyTerminalPainter extends CustomPainter {
         ? Colors.transparent
         : resolved.background;
     final ratio = minimumContrastRatio;
-    if (ratio == null || style.invisible) {
+    if (!applyContrast || ratio == null || style.invisible) {
       // Invisible is deliberate fg == bg (SGR 8) — flooring it would reveal
       // hidden text. Faint/dim text is NOT exempt: dim must stay readable.
       return (foreground: foreground, background: background);

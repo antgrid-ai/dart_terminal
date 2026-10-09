@@ -98,6 +98,7 @@ void main() {
       Color? selectionColor,
       double? fontSize,
       double? lineHeight,
+      double? minimumContrastRatio,
       GhosttyTerminalRendererMode renderer =
           GhosttyTerminalRendererMode.formatter,
       GhosttyTerminalCopyOptions copyOptions =
@@ -144,6 +145,7 @@ void main() {
               selectionColor: selectionColor ?? const Color(0x665DA9FF),
               fontSize: fontSize ?? 14,
               lineHeight: lineHeight ?? 1.35,
+              minimumContrastRatio: minimumContrastRatio,
               renderer: renderer,
               copyOptions: copyOptions,
               wordBoundaryPolicy: wordBoundaryPolicy,
@@ -640,7 +642,7 @@ void main() {
       const cursorText = Color(0xFFFF2200);
 
       // Steady block, then park the cursor back on the 'b'.
-      controller.appendDebugOutput('[2 qabc[D[D');
+      controller.appendDebugOutput('\x1b[2 qabc\x1b[D\x1b[D');
 
       final key = GlobalKey();
       await tester.pumpWidget(
@@ -679,7 +681,7 @@ void main() {
       const cursorText = Color(0xFFFF2200);
 
       // Cursor sits past the end of 'abc', on an empty cell.
-      controller.appendDebugOutput('[2 qabc');
+      controller.appendDebugOutput('\x1b[2 qabc');
 
       final key = GlobalKey();
       await tester.pumpWidget(
@@ -2120,6 +2122,136 @@ void main() {
       );
       expect(_pixelIsNonBackground(image, x: leftColX, y: middleRowY), isTrue);
     });
+
+    testWidgets('contrast floor preserves block graphics in mixed text runs', (
+      tester,
+    ) async {
+      controller.appendDebugOutput(
+        '\x1b[38;2;30;30;30m▀▄█▌▐▖▗▘▙▚▛▜▝▞▟░▒▓M\x1b[0m',
+      );
+      final key = GlobalKey();
+      await tester.pumpWidget(
+        RepaintBoundary(
+          key: key,
+          child: buildView(
+            renderer: GhosttyTerminalRendererMode.renderState,
+            showHeader: false,
+            showCursor: false,
+            backgroundColor: const Color(0xFF0A0A0A),
+            minimumContrastRatio: 4.5,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      final image = await _captureTerminalImageData(tester, key);
+      final (:charWidth, :linePixels, :padding) = _measureTestMetrics();
+      // OpenCode's top-half border retains the input background exactly.
+      expect(
+        _pixelMatchesColor(
+          image,
+          x: padding + charWidth ~/ 2,
+          y: padding + linePixels ~/ 4,
+          color: const Color(0xFF1E1E1E),
+        ),
+        isTrue,
+      );
+      // Bottom half remains the surrounding terminal background.
+      expect(
+        _pixelMatchesColor(
+          image,
+          x: padding + charWidth ~/ 2,
+          y: padding + 3 * linePixels ~/ 4,
+          color: const Color(0xFF0A0A0A),
+        ),
+        isTrue,
+      );
+      // Text in the SAME style run still receives the readability floor.
+      final floored = ensureMinimumContrast(
+        const Color(0xFF1E1E1E),
+        const Color(0xFF0A0A0A),
+        4.5,
+      );
+      var textPixels = 0;
+      for (var y = padding; y < padding + linePixels; y++) {
+        for (
+          var x = padding + 18 * charWidth;
+          x < padding + 19 * charWidth;
+          x++
+        ) {
+          if (_pixelMatchesColor(image, x: x, y: y, color: floored)) {
+            textPixels++;
+          }
+        }
+      }
+      expect(textPixels, greaterThan(0));
+    }, skip: !hasNativeTerminal);
+
+    for (final ratio in <double?>[null, 4.5]) {
+      for (final explicitForeground in [false, true]) {
+        testWidgets(
+          'linked block graphics preserve foreground with contrast $ratio and explicit $explicitForeground',
+          (tester) async {
+            const accent = Color(0xFF303060);
+            const explicit = Color(0xFF1E1E1E);
+            const background = Color(0xFF0A0A0A);
+            controller.appendDebugOutput(
+              '\x1b]8;;https://example.com\x1b\\'
+              '${explicitForeground ? '\x1b[38;2;30;30;30m' : ''}'
+              '▀M\x1b[0m\x1b]8;;\x1b\\',
+            );
+            final key = GlobalKey();
+            await tester.pumpWidget(
+              RepaintBoundary(
+                key: key,
+                child: buildView(
+                  renderer: GhosttyTerminalRendererMode.renderState,
+                  showHeader: false,
+                  showCursor: false,
+                  backgroundColor: background,
+                  hyperlinkColor: accent,
+                  minimumContrastRatio: ratio,
+                ),
+              ),
+            );
+            await tester.pumpAndSettle();
+            final image = await _captureTerminalImageData(tester, key);
+            final (:charWidth, :linePixels, :padding) = _measureTestMetrics();
+            final rawForeground = explicitForeground ? explicit : accent;
+            expect(
+              _pixelMatchesColor(
+                image,
+                x: padding + charWidth ~/ 2,
+                y: padding + linePixels ~/ 4,
+                color: rawForeground,
+              ),
+              isTrue,
+            );
+            final textForeground = ratio == null
+                ? rawForeground
+                : ensureMinimumContrast(rawForeground, background, ratio);
+            var textPixels = 0;
+            for (var y = padding; y < padding + linePixels; y++) {
+              for (
+                var x = padding + charWidth;
+                x < padding + 2 * charWidth;
+                x++
+              ) {
+                if (_pixelMatchesColor(
+                  image,
+                  x: x,
+                  y: y,
+                  color: textForeground,
+                )) {
+                  textPixels++;
+                }
+              }
+            }
+            expect(textPixels, greaterThan(0));
+          },
+          skip: !hasNativeTerminal,
+        );
+      }
+    }
 
     testWidgets('single-cell circle glyphs keep spacing inside the cell', (
       tester,
