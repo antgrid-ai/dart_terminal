@@ -107,11 +107,9 @@ void main() {
     // unnoticed on every host that lacks it — which includes CI.
     final fixtures = _colorParityFixtureDir();
     final corpus = File('${fixtures.path}/color_torture.bin').readAsBytesSync();
-    final expected =
-        jsonDecode(
-              File('${fixtures.path}/expected_cells.json').readAsStringSync(),
-            )
-            as List<dynamic>;
+    final expected = jsonDecode(
+      File('${fixtures.path}/expected_cells.json').readAsStringSync(),
+    ) as List<dynamic>;
     expect(corpus, isNotEmpty);
     expect(expected, isNotEmpty);
 

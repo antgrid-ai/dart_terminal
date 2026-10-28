@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ghostty_vte_flutter/ghostty_vte_flutter.dart';
+import 'package:image/image.dart' as image;
 
 import 'support/native_terminal.dart';
 
@@ -600,51 +601,48 @@ void main() {
     expect(controller.isViewportAtBottom, isTrue);
   });
 
-  test(
-    'renderState snapshot carries foreground, background, and underline attributes',
-    () {
-      if (!hasNativeTerminal) {
-        return;
-      }
-      final controller = GhosttyTerminalController(
-        initialCols: 40,
-        initialRows: 6,
-      );
-      addTearDown(controller.dispose);
+  test('renderState snapshot carries foreground, background, and underline attributes', () {
+    if (!hasNativeTerminal) {
+      return;
+    }
+    final controller = GhosttyTerminalController(
+      initialCols: 40,
+      initialRows: 6,
+    );
+    addTearDown(controller.dispose);
 
-      // Row 0: red foreground. Row 1: blue background. Row 2: underlined.
-      controller.appendDebugOutput(
-        '\x1b[31mRED\x1b[0m\r\n'
-        '\x1b[44mBG\x1b[0m\r\n'
-        '\x1b[4mUL\x1b[0m\r\n',
-      );
+    // Row 0: red foreground. Row 1: blue background. Row 2: underlined.
+    controller.appendDebugOutput(
+      '\x1b[31mRED\x1b[0m\r\n'
+      '\x1b[44mBG\x1b[0m\r\n'
+      '\x1b[4mUL\x1b[0m\r\n',
+    );
 
-      final snapshot = controller.renderSnapshot;
-      expect(snapshot, isNotNull);
-      final rows = snapshot!.rowsData;
-      expect(rows.length, greaterThanOrEqualTo(3));
+    final snapshot = controller.renderSnapshot;
+    expect(snapshot, isNotNull);
+    final rows = snapshot!.rowsData;
+    expect(rows.length, greaterThanOrEqualTo(3));
 
-      // Foreground: SGR 31 maps to palette index 1 (red).
-      final redCell = rows[0].cells.first;
-      expect(redCell.text, 'R');
-      expect(redCell.style.hasExplicitForeground, isTrue);
-      expect(redCell.style.foregroundToken?.paletteIndex, 1);
+    // Foreground: SGR 31 maps to palette index 1 (red).
+    final redCell = rows[0].cells.first;
+    expect(redCell.text, 'R');
+    expect(redCell.style.hasExplicitForeground, isTrue);
+    expect(redCell.style.foregroundToken?.paletteIndex, 1);
 
-      // Background: SGR 44 maps to palette index 4 (blue).
-      final bgCell = rows[1].cells.first;
-      expect(bgCell.text, 'B');
-      expect(bgCell.style.hasExplicitBackground, isTrue);
-      expect(bgCell.style.backgroundToken?.paletteIndex, 4);
+    // Background: SGR 44 maps to palette index 4 (blue).
+    final bgCell = rows[1].cells.first;
+    expect(bgCell.text, 'B');
+    expect(bgCell.style.hasExplicitBackground, isTrue);
+    expect(bgCell.style.backgroundToken?.paletteIndex, 4);
 
-      // Underline: SGR 4 sets single underline.
-      final ulCell = rows[2].cells.first;
-      expect(ulCell.text, 'U');
-      expect(
-        ulCell.style.underline,
-        isNot(GhosttySgrUnderline.GHOSTTY_SGR_UNDERLINE_NONE),
-      );
-    },
-  );
+    // Underline: SGR 4 sets single underline.
+    final ulCell = rows[2].cells.first;
+    expect(ulCell.text, 'U');
+    expect(
+      ulCell.style.underline,
+      isNot(GhosttySgrUnderline.GHOSTTY_SGR_UNDERLINE_NONE),
+    );
+  });
 
   test('selection text and hyperlinks resolve through the snapshot', () {
     if (!hasNativeTerminal) {
@@ -729,6 +727,125 @@ void main() {
       ),
       isNull,
     );
+  });
+
+  test(
+    'render snapshot copies Kitty RGB image pixels and placement geometry',
+    () {
+      if (!hasNativeTerminal) {
+        return;
+      }
+
+      final controller = GhosttyTerminalController();
+      addTearDown(controller.dispose);
+      if (!controller.buildInfo.kittyGraphics) {
+        return;
+      }
+
+      controller.resize(cols: 80, rows: 24, cellWidthPx: 10, cellHeightPx: 20);
+      controller.appendDebugOutput(
+        '\x1b_Ga=T,t=d,f=24,i=1,p=1,s=1,v=2,c=10,r=1;////////\x1b\\',
+      );
+
+      final snapshot = controller.renderSnapshot!;
+      final kittyImage = snapshot.kittyImages[1];
+      expect(kittyImage, isNotNull);
+      expect(kittyImage!.width, 1);
+      expect(kittyImage.height, 2);
+      expect(kittyImage.rgba, <int>[
+        0xFF,
+        0xFF,
+        0xFF,
+        0xFF,
+        0xFF,
+        0xFF,
+        0xFF,
+        0xFF,
+      ]);
+
+      expect(snapshot.kittyPlacements, hasLength(1));
+      final placement = snapshot.kittyPlacements.single;
+      expect(placement.imageId, 1);
+      expect(placement.placementId, 1);
+      expect(placement.layer, GhosttyTerminalKittyPlacementLayer.aboveText);
+      expect(placement.viewportCol, 0);
+      expect(placement.viewportRow, 0);
+      expect(placement.gridCols, 10);
+      expect(placement.gridRows, 1);
+      expect(placement.sourceWidth, 1);
+      expect(placement.sourceHeight, 2);
+    },
+  );
+
+  test('controller installs the synchronous PNG decoder for Kitty images', () {
+    if (!hasNativeTerminal) {
+      return;
+    }
+
+    final controller = GhosttyTerminalController();
+    addTearDown(controller.dispose);
+    if (!controller.buildInfo.kittyGraphics) {
+      return;
+    }
+
+    final source = image.Image(width: 1, height: 1)
+      ..setPixelRgba(0, 0, 0x12, 0x34, 0x56, 0xFF);
+    final encoded = base64Encode(image.encodePng(source));
+    controller.appendDebugOutput(
+      '\x1b_Ga=T,t=d,f=100,i=2,p=2,c=1,r=1;$encoded\x1b\\',
+    );
+
+    final kittyImage = controller.renderSnapshot!.kittyImages[2];
+    expect(kittyImage, isNotNull);
+    expect(kittyImage!.width, 1);
+    expect(kittyImage.height, 1);
+    expect(kittyImage.rgba, <int>[0x12, 0x34, 0x56, 0xFF]);
+  });
+
+  test('render snapshot reconstructs Kitty Unicode virtual placements', () {
+    if (!hasNativeTerminal) {
+      return;
+    }
+
+    final controller = GhosttyTerminalController();
+    addTearDown(controller.dispose);
+    if (!controller.buildInfo.kittyGraphics) {
+      return;
+    }
+
+    controller.appendDebugOutput(
+      '\x1b_Ga=t,t=d,f=24,i=3,s=1,v=1;/wAA\x1b\\'
+      '\x1b_Ga=p,i=3,p=3,U=1,c=1,r=1\x1b\\'
+      '\x1b[38;5;3m\u{10EEEE}\u0305\u0305\x1b[39m',
+    );
+
+    final snapshot = controller.renderSnapshot!;
+    expect(snapshot.hasUnresolvedKittyVirtualPlacements, isFalse);
+    expect(snapshot.kittyPlacements, hasLength(1));
+    final placement = snapshot.kittyPlacements.single;
+    expect(placement.isVirtual, isTrue);
+    expect(placement.imageId, 3);
+    expect(placement.placementId, 3);
+    expect(placement.layer, GhosttyTerminalKittyPlacementLayer.aboveText);
+    expect(placement.z, 0);
+    expect(placement.viewportCol, 0);
+    expect(placement.viewportRow, 0);
+    expect(placement.virtualSourceCol, 0);
+    expect(placement.virtualSourceRow, 0);
+  });
+
+  test('render snapshot exposes the native cursor color and blink state', () {
+    if (!hasNativeTerminal) {
+      return;
+    }
+
+    final controller = GhosttyTerminalController();
+    addTearDown(controller.dispose);
+
+    controller.appendDebugOutput('\x1b]12;#f04a7f\x07\x1b[1 q');
+
+    expect(controller.renderSnapshot?.cursor.color, const Color(0xFFF04A7F));
+    expect(controller.renderSnapshot?.cursor.blinking, isTrue);
   });
 
   testWidgets('terminal view renders custom painter', (tester) async {
