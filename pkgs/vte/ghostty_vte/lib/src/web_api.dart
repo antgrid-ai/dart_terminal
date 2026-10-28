@@ -3679,18 +3679,11 @@ final class VtMouseEncoderOptions {
 }
 
 final class VtTerminal {
-  VtTerminal({
-    required int cols,
-    required int rows,
-    int maxScrollback = 10_000,
-    int? maxScrollbackLines,
-  }) : _cols = _checkPositiveUint16(cols, 'cols'),
-       _rows = _checkPositiveUint16(rows, 'rows'),
-       _maxScrollback = _checkNonNegative(maxScrollback, 'maxScrollback'),
-       _maxScrollbackLines = maxScrollbackLines == null
-           ? null
-           : _checkNonNegative(maxScrollbackLines, 'maxScrollbackLines'),
-       _wasm = _requireTerminalRuntime('VtTerminal') {
+  VtTerminal({required int cols, required int rows, int maxScrollback = 10_000})
+    : _cols = _checkPositiveUint16(cols, 'cols'),
+      _rows = _checkPositiveUint16(rows, 'rows'),
+      _maxScrollback = _checkNonNegative(maxScrollback, 'maxScrollback'),
+      _wasm = _requireTerminalRuntime('VtTerminal') {
     final out = _allocOpaqueOrThrow(_wasm, 'ghostty_wasm_alloc_opaque');
     try {
       final result = _wasm.callInt('ghostty_terminal_new', <Object>[
@@ -3702,12 +3695,17 @@ final class VtTerminal {
       _checkResult(result, 'ghostty_terminal_new');
       _handle = _wasm.takeOpaque(out);
       try {
-        // Same budget semantics as native: [maxScrollback] is the byte limit
-        // `ghostty_terminal_new` used to carry, and the row budget is separate.
-        _terminalSetSize(_ghosttyTerminalOptScrollbackMaxBytes, _maxScrollback);
-        final lines = _maxScrollbackLines;
-        if (lines != null) {
-          _terminalSetSize(_ghosttyTerminalOptScrollbackMaxLines, lines);
+        // Same limit as native: [maxScrollback] rows, with the engine's
+        // default 10,000-byte cap lifted so it cannot undercut them, and zero
+        // set through that byte cap, the one that turns scrollback off.
+        if (_maxScrollback == 0) {
+          _terminalSetSize(_ghosttyTerminalOptScrollbackMaxBytes, 0);
+        } else {
+          _terminalClearSize(_ghosttyTerminalOptScrollbackMaxBytes);
+          _terminalSetSize(
+            _ghosttyTerminalOptScrollbackMaxLines,
+            _maxScrollback,
+          );
         }
       } catch (_) {
         _wasm.callInt('ghostty_terminal_free', <Object>[_handle]);
@@ -3726,10 +3724,9 @@ final class VtTerminal {
     _cols = _terminalUint16(_ghosttyTerminalDataCols);
     _rows = _terminalUint16(_ghosttyTerminalDataRows);
     _maxScrollback =
-        _terminalOptionalSize(_ghosttyTerminalDataScrollbackMaxBytes) ?? 0;
-    _maxScrollbackLines = _terminalOptionalSize(
-      _ghosttyTerminalDataScrollbackMaxLines,
-    );
+        _terminalOptionalSize(_ghosttyTerminalDataScrollbackMaxBytes) == 0
+        ? 0
+        : _terminalOptionalSize(_ghosttyTerminalDataScrollbackMaxLines) ?? 0;
   }
 
   final _GhosttyWasmRuntime _wasm;
@@ -3739,7 +3736,6 @@ final class VtTerminal {
   int _cols;
   int _rows;
   int _maxScrollback;
-  int? _maxScrollbackLines;
 
   /// Not yet supported on the web platform.
   // ignore: use_setters_to_change_properties
@@ -3870,15 +3866,10 @@ final class VtTerminal {
     return _rows;
   }
 
+  /// Maximum scrollback the engine retains, in rows.
   int get maxScrollback {
     _ensureOpen();
     return _maxScrollback;
-  }
-
-  /// The row budget passed at construction, or null when none was set.
-  int? get maxScrollbackLines {
-    _ensureOpen();
-    return _maxScrollbackLines;
   }
 
   /// The current cursor position within the active screen.
@@ -4319,6 +4310,15 @@ final class VtTerminal {
     } finally {
       _wasm.freeUsize(out);
     }
+  }
+
+  /// Passes a NULL value pointer, which the engine reads as "no limit".
+  void _terminalClearSize(int option) {
+    _ensureOpen();
+    _checkResult(
+      _wasm.callInt('ghostty_terminal_set', <Object>[_handle, option, 0]),
+      'ghostty_terminal_set',
+    );
   }
 
   void _terminalSetBool(int option, bool value) {
@@ -5255,13 +5255,7 @@ final class GhosttyVt {
     required int cols,
     required int rows,
     int maxScrollback = 10_000,
-    int? maxScrollbackLines,
-  }) => VtTerminal(
-    cols: cols,
-    rows: rows,
-    maxScrollback: maxScrollback,
-    maxScrollbackLines: maxScrollbackLines,
-  );
+  }) => VtTerminal(cols: cols, rows: rows, maxScrollback: maxScrollback);
 
   static bool _buildInfoBool(_GhosttyWasmRuntime rt, int data) {
     final out = rt.allocU8();

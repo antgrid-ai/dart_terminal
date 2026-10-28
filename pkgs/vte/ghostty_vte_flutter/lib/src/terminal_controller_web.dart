@@ -20,7 +20,7 @@ class GhosttyTerminalController extends ChangeNotifier
     implements GhosttyTerminalSessionController {
   GhosttyTerminalController({
     this.maxLines = 2000,
-    this.maxScrollback = 10_000,
+    int? maxScrollback,
     this.initialCols = 80,
     this.initialRows = 24,
     this.preferPty = true,
@@ -28,16 +28,18 @@ class GhosttyTerminalController extends ChangeNotifier
     this.mouseMotionReportInterval = Duration.zero,
   }) : assert(!mouseMotionReportInterval.isNegative),
        assert(maxLines > 0),
-       assert(maxScrollback >= 0),
+       assert(maxScrollback == null || maxScrollback >= 0),
        assert(initialCols > 0),
        assert(initialRows > 0),
+       maxScrollback = maxScrollback ?? maxLines,
        _cols = initialCols,
        _rows = initialRows;
 
   /// Maximum retained line count in the formatted terminal snapshot.
   final int maxLines;
 
-  /// Maximum terminal scrollback depth retained by [VtTerminal].
+  /// Maximum scrollback the engine retains, in rows. Defaults to [maxLines],
+  /// as on native.
   final int maxScrollback;
 
   /// Initial terminal width in cells before the view reports a real size.

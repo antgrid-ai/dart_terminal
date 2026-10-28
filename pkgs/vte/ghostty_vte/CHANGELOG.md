@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.0-beta.2+antgrid.1
+
+- `maxScrollback` is a row limit, as upstream intends, and is now the only
+  limit: the engine's default 10,000-byte cap, which kept about a thousand
+  rows whatever `maxScrollback` asked for, is lifted. `maxScrollback: 0` turns
+  scrollback off through the byte cap. Terminals restored from a snapshot
+  report the same value.
+- Removed `maxScrollbackLines`; pass the row count as `maxScrollback`.
+
 ## 0.2.0-beta.2
 
 - Added incremental snapshot decoding with history restoration and safe

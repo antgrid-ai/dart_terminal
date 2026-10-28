@@ -1155,16 +1155,14 @@ void main() {
     expect(terminal.scrollbackRows, 0);
   });
 
-  test('maxScrollbackLines holds a row budget across terminal widths', () {
-    // The byte budget cannot express "N rows": the same history costs about
-    // 2.5x more at 202 columns than at 80, so a byte number sized for a narrow
-    // terminal silently truncates a wide one. The row budget must not.
+  test('maxScrollback holds a row limit across terminal widths', () {
+    // The same history costs about 2.5x more memory at 202 columns than at
+    // 80, so a limit that were really bytes would truncate the wide terminal.
     int retainedAt(int cols) {
       final terminal = GhosttyVt.newTerminal(
         cols: cols,
         rows: 49,
-        maxScrollback: 256 << 20,
-        maxScrollbackLines: 4000,
+        maxScrollback: 4000,
       );
       addTearDown(terminal.close);
 
@@ -1191,23 +1189,34 @@ void main() {
     expect(wide, lessThanOrEqualTo(4000 + 49));
   });
 
-  test('the byte budget still binds when it is the tighter of the two', () {
-    final terminal = GhosttyVt.newTerminal(
-      cols: 80,
-      rows: 24,
-      maxScrollback: 1 << 20,
-      maxScrollbackLines: 100000,
-    );
+  test('the default row limit is not undercut by the engine byte cap', () {
+    // The engine's own default caps scrollback at 10,000 bytes, about a
+    // thousand rows; left in place it would bind long before the row limit.
+    final terminal = GhosttyVt.newTerminal(cols: 80, rows: 24);
     addTearDown(terminal.close);
-
-    final formatter = terminal.createFormatter();
-    addTearDown(formatter.close);
 
     for (var i = 0; i < 20000; i++) {
       terminal.write('line $i\r\n');
     }
 
-    expect(formatter.formatText().split('\n').length, lessThan(20000));
+    expect(terminal.scrollbackRows, greaterThan(9000));
+    expect(terminal.scrollbackRows, lessThanOrEqualTo(10000));
+  });
+
+  test('maxScrollback of zero keeps no scrollback', () {
+    final terminal = GhosttyVt.newTerminal(
+      cols: 80,
+      rows: 24,
+      maxScrollback: 0,
+    );
+    addTearDown(terminal.close);
+
+    for (var i = 0; i < 2000; i++) {
+      terminal.write('line $i\r\n');
+    }
+
+    expect(terminal.scrollbackRows, 0);
+    expect(terminal.maxScrollback, 0);
   });
 
   test('widthPx and heightPx reflect pixel dimensions from resize', () {
@@ -1637,25 +1646,24 @@ void main() {
     expect(decoder.sourceOffset, greaterThan(0));
   });
 
-  test('a restored terminal reports both scrollback budgets', () {
-    // maxScrollback is a byte budget and maxScrollbackLines a row budget; a
-    // terminal rebuilt from a snapshot must read each back from its own
-    // option rather than reporting the row budget as bytes.
-    final source = GhosttyVt.newTerminal(
-      cols: 20,
-      rows: 4,
-      maxScrollback: 1 << 20,
-      maxScrollbackLines: 5000,
-    );
-    addTearDown(source.close);
-    source.write('snapshot content');
-    final decoder = VtSnapshotDecoder(source.snapshotBytes());
-    addTearDown(decoder.close);
-    final restored = decoder.decode();
-    addTearDown(restored.close);
+  test('a restored terminal reports its scrollback row limit', () {
+    // Zero is stored as a zero byte cap rather than a row limit, so it is the
+    // case most likely to read back wrong.
+    for (final maxScrollback in [5000, 0]) {
+      final source = GhosttyVt.newTerminal(
+        cols: 20,
+        rows: 4,
+        maxScrollback: maxScrollback,
+      );
+      addTearDown(source.close);
+      source.write('snapshot content');
+      final decoder = VtSnapshotDecoder(source.snapshotBytes());
+      addTearDown(decoder.close);
+      final restored = decoder.decode();
+      addTearDown(restored.close);
 
-    expect(restored.maxScrollback, source.maxScrollback);
-    expect(restored.maxScrollbackLines, source.maxScrollbackLines);
+      expect(restored.maxScrollback, maxScrollback);
+    }
   });
 
   test('incremental snapshot decoder rejects a closed restored terminal', () {

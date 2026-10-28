@@ -177,13 +177,7 @@ final class GhosttyVt {
     required int cols,
     required int rows,
     int maxScrollback = 10_000,
-    int? maxScrollbackLines,
-  }) => VtTerminal(
-    cols: cols,
-    rows: rows,
-    maxScrollback: maxScrollback,
-    maxScrollbackLines: maxScrollbackLines,
-  );
+  }) => VtTerminal(cols: cols, rows: rows, maxScrollback: maxScrollback);
 
   /// Creates a mouse event object.
   static VtMouseEvent newMouseEvent() => VtMouseEvent();
@@ -3180,23 +3174,15 @@ final class VtUnknownSequence {
 
 /// Stateful VT terminal emulator instance.
 final class VtTerminal {
-  VtTerminal({
-    required int cols,
-    required int rows,
-    int maxScrollback = 10_000,
-    int? maxScrollbackLines,
-  }) : _cols = _checkPositiveUint16(cols, 'cols'),
-       _rows = _checkPositiveUint16(rows, 'rows'),
-       _maxScrollback = _checkNonNegative(maxScrollback, 'maxScrollback'),
-       _maxScrollbackLines = maxScrollbackLines == null
-           ? null
-           : _checkNonNegative(maxScrollbackLines, 'maxScrollbackLines'),
-       _handle = _newTerminal(
-         cols: cols,
-         rows: rows,
-         maxScrollback: maxScrollback,
-         maxScrollbackLines: maxScrollbackLines,
-       );
+  VtTerminal({required int cols, required int rows, int maxScrollback = 10_000})
+    : _cols = _checkPositiveUint16(cols, 'cols'),
+      _rows = _checkPositiveUint16(rows, 'rows'),
+      _maxScrollback = _checkNonNegative(maxScrollback, 'maxScrollback'),
+      _handle = _newTerminal(
+        cols: cols,
+        rows: rows,
+        maxScrollback: maxScrollback,
+      );
 
   VtTerminal._fromHandle(this._handle)
     : _cols = _queryUint16(
@@ -3207,18 +3193,7 @@ final class VtTerminal {
         _handle,
         bindings.GhosttyTerminalData.GHOSTTY_TERMINAL_DATA_ROWS,
       ),
-      _maxScrollback =
-          _queryOptionalSize(
-            _handle,
-            bindings
-                .GhosttyTerminalData
-                .GHOSTTY_TERMINAL_DATA_SCROLLBACK_MAX_BYTES,
-          ) ??
-          0,
-      _maxScrollbackLines = _queryOptionalSize(
-        _handle,
-        bindings.GhosttyTerminalData.GHOSTTY_TERMINAL_DATA_SCROLLBACK_MAX_LINES,
-      );
+      _maxScrollback = _queryScrollbackLimit(_handle);
 
   final bindings.GhosttyTerminal _handle;
   final Set<VtTerminalFormatter> _formatters = <VtTerminalFormatter>{};
@@ -3226,7 +3201,6 @@ final class VtTerminal {
   int _cols;
   int _rows;
   final int _maxScrollback;
-  final int? _maxScrollbackLines;
 
   ffi.NativeCallable<bindings.GhosttyMimeReaderFnFunction>?
   _pasteReaderCallable;
@@ -3820,11 +3794,8 @@ final class VtTerminal {
     required int cols,
     required int rows,
     required int maxScrollback,
-    required int? maxScrollbackLines,
   }) {
     final out = calloc<bindings.GhosttyTerminal>();
-    final maxScrollbackPtr = calloc<ffi.Size>();
-    maxScrollbackPtr.value = _checkNonNegative(maxScrollback, 'maxScrollback');
     try {
       final result = bindings.ghostty_terminal_new(
         ffi.nullptr,
@@ -3836,73 +3807,97 @@ final class VtTerminal {
 
       final terminal = out.value;
       try {
-        _setScrollbackMaxBytes(terminal, maxScrollback);
-        if (maxScrollbackLines != null) {
-          _setScrollbackMaxLines(terminal, maxScrollbackLines);
-        }
+        _setScrollbackLimit(terminal, maxScrollback);
       } catch (_) {
         bindings.ghostty_terminal_free(terminal);
         rethrow;
       }
       return terminal;
     } finally {
-      calloc.free(maxScrollbackPtr);
       calloc.free(out);
     }
   }
 
-  /// Applies the scrollback budget that `ghostty_terminal_new` used to carry.
+  /// Makes [maxScrollback] rows the only scrollback limit.
   ///
-  /// Upstream moved the limit out of the constructor into `terminal_set`; the
-  /// byte limit is what the old `max_scrollback` field meant.
-  static void _setScrollbackMaxBytes(
+  /// The engine also caps scrollback by bytes, by default at 10,000 — about a
+  /// thousand rows — which would silently undercut any larger row limit, so
+  /// the byte cap is lifted. Zero goes through the byte cap instead: it is the
+  /// one that turns scrollback off, where a zero row limit still keeps a row.
+  ///
+  /// The row limit is page-granular: the engine only drops whole historical
+  /// pages, so the retained count approaches [maxScrollback] from below.
+  static void _setScrollbackLimit(
     bindings.GhosttyTerminal terminal,
     int maxScrollback,
   ) {
-    final value = calloc<ffi.Size>();
-    try {
-      value.value = _checkNonNegative(maxScrollback, 'maxScrollback');
-      _checkResult(
-        bindings.ghostty_terminal_set(
-          terminal,
-          bindings
-              .GhosttyTerminalOption
-              .GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_BYTES,
-          value.cast(),
-        ),
+    _checkNonNegative(maxScrollback, 'maxScrollback');
+    if (maxScrollback == 0) {
+      _setOptionalSize(
+        terminal,
+        bindings
+            .GhosttyTerminalOption
+            .GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_BYTES,
+        0,
         'ghostty_terminal_set(scrollback_max_bytes)',
       );
-    } finally {
-      calloc.free(value);
+      return;
     }
+    _setOptionalSize(
+      terminal,
+      bindings.GhosttyTerminalOption.GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_BYTES,
+      null,
+      'ghostty_terminal_set(scrollback_max_bytes)',
+    );
+    _setOptionalSize(
+      terminal,
+      bindings.GhosttyTerminalOption.GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_LINES,
+      maxScrollback,
+      'ghostty_terminal_set(scrollback_max_lines)',
+    );
   }
 
-  /// Applies a scrollback budget expressed in physical rows.
-  ///
-  /// Page-granular: the engine permits at least one standard page of rows and
-  /// only drops whole historical pages, so the retained count is an upper
-  /// bound approached from above. The byte limit still applies independently —
-  /// whichever binds first wins, so a caller that wants a line budget honoured
-  /// must leave enough bytes to hold it.
-  static void _setScrollbackMaxLines(
+  /// Reads back the limit [_setScrollbackLimit] applied, where a zero byte cap
+  /// stands for no scrollback.
+  static int _queryScrollbackLimit(bindings.GhosttyTerminal handle) {
+    final maxBytes = _queryOptionalSize(
+      handle,
+      bindings.GhosttyTerminalData.GHOSTTY_TERMINAL_DATA_SCROLLBACK_MAX_BYTES,
+    );
+    if (maxBytes == 0) {
+      return 0;
+    }
+    return _queryOptionalSize(
+          handle,
+          bindings
+              .GhosttyTerminalData
+              .GHOSTTY_TERMINAL_DATA_SCROLLBACK_MAX_LINES,
+        ) ??
+        0;
+  }
+
+  /// Sets a `size_t` terminal option; null passes a NULL pointer, which the
+  /// engine reads as "no limit".
+  static void _setOptionalSize(
     bindings.GhosttyTerminal terminal,
-    int maxScrollbackLines,
+    bindings.GhosttyTerminalOption option,
+    int? value,
+    String operation,
   ) {
-    final value = calloc<ffi.Size>();
+    final ptr = value == null ? null : (calloc<ffi.Size>()..value = value);
     try {
-      value.value = maxScrollbackLines;
       _checkResult(
         bindings.ghostty_terminal_set(
           terminal,
-          bindings
-              .GhosttyTerminalOption
-              .GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_LINES,
-          value.cast(),
+          option,
+          ptr?.cast() ?? ffi.nullptr,
         ),
-        'ghostty_terminal_set(scrollback_max_lines)',
+        operation,
       );
     } finally {
-      calloc.free(value);
+      if (ptr != null) {
+        calloc.free(ptr);
+      }
     }
   }
 
@@ -3926,15 +3921,10 @@ final class VtTerminal {
     return _rows;
   }
 
+  /// Maximum scrollback the engine retains, in rows.
   int get maxScrollback {
     _ensureOpen();
     return _maxScrollback;
-  }
-
-  /// The scrollback row budget, or null when only the byte budget applies.
-  int? get maxScrollbackLines {
-    _ensureOpen();
-    return _maxScrollbackLines;
   }
 
   /// The current cursor position within the active screen.

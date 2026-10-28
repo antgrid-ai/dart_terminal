@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- `maxScrollback` is a row limit and defaults to `maxLines`;
+  `maxScrollbackLines` is removed.
+
 - Added optional mouse-motion coalescing with `mouseMotionReportInterval` and
   explicit flush/cancellation hooks for host lifecycle changes.
 - Preserved cell deduplication across motion reports and kept non-motion input

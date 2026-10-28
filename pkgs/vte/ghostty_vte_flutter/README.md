@@ -153,7 +153,7 @@ bytes into `appendDebugOutput()`.
 ```dart
 final controller = GhosttyTerminalController(
   maxLines: 2000,          // max retained lines in formatted snapshot
-  maxScrollback: 10000,    // scrollback depth in the VT terminal
+  maxScrollback: 10000,    // scrollback rows (defaults to maxLines)
   initialCols: 80,         // initial grid width before layout
   initialRows: 24,         // initial grid height before layout
   preferPty: true,         // prefer native PTY over Process.start

@@ -111,7 +111,7 @@ tracks cursor state, manages scrollback, and exposes terminal mode flags.
 final terminal = GhosttyVt.newTerminal(
   cols: 80,
   rows: 24,
-  maxScrollback: 10000,  // default
+  maxScrollback: 10000,  // scrollback rows (default)
 );
 ```
 
