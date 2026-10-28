@@ -9,6 +9,7 @@ import 'package:flutter/services.dart';
 import 'package:ghostty_vte/ghostty_vte.dart';
 
 import 'contrast.dart';
+import 'glyph_fit.dart';
 import 'keyboard_input.dart';
 import 'terminal_auto_scroll_session.dart';
 import 'terminal_controller.dart';
@@ -4764,9 +4765,7 @@ class _GhosttyTerminalPainter extends CustomPainter {
           painter.paint(canvas, Offset(rowRect.left, rowBand.top));
           canvas.restore();
         } else {
-          // Same per-glyph placement as the renderState path: relax the clip so
-          // an oversized symbol-font fallback bleeds into the neighbouring cell
-          // instead of being shaved, and sit glyphs on the shared row baseline.
+          // Same per-glyph placement and clip as the renderState path.
           canvas.save();
           canvas.clipRect(
             Rect.fromLTRB(
@@ -4780,35 +4779,19 @@ class _GhosttyTerminalPainter extends CustomPainter {
             final character = graphemes[index];
             final widthCells = cellWidths[index];
             final cellWidth = widthCells * charWidth;
-            final cellRect = Rect.fromLTRB(
-              textX,
-              rowBand.top,
-              textX + cellWidth,
-              rowBand.bottom,
-            );
-            if (widthCells == 1 &&
-                _paintTerminalSpecialGlyph(
-                  canvas,
-                  character,
-                  rect: cellRect,
-                  color: style.foreground,
-                )) {
-              textX += cellWidth;
-              continue;
-            }
-            _debugLogUnsupportedGlyph(character);
-            final painter = TextPainter(
-              text: TextSpan(
-                text: character,
-                style: textStyle.copyWith(letterSpacing: 0),
+            _paintCellGlyph(
+              canvas,
+              character,
+              cellRect: Rect.fromLTRB(
+                textX,
+                rowBand.top,
+                textX + cellWidth,
+                rowBand.bottom,
               ),
-              textDirection: TextDirection.ltr,
-              maxLines: 1,
-            )..layout();
-            final glyphX = painter.width > cellWidth
-                ? textX + (cellWidth - painter.width) / 2
-                : textX;
-            painter.paint(canvas, Offset(glyphX, rowBand.top));
+              widthCells: widthCells,
+              textStyle: textStyle,
+              color: style.foreground,
+            );
             textX += cellWidth;
           }
           canvas.restore();
@@ -5130,24 +5113,11 @@ class _GhosttyTerminalPainter extends CustomPainter {
             } else {
               // Per-glyph fallback for runs that can't be painted as a single
               // run (wide cells, custom-painted glyphs, or text failing the
-              // single-run safety checks). Mirror ghostty-web's model: clip to
-              // the run, then place each glyph left-aligned on the shared row
-              // baseline at its natural font size — exactly the single-run
-              // path's `painter.paint(canvas, Offset(rect.left, rowBand.top))`,
-              // where `textStyle.height` positions the baseline within the line
-              // box. The previous `_centerGlyphInCell` centered glyphs on their
-              // tight ink bounds, which distorted apparent width and pulled
-              // glyphs off the baseline relative to their neighbors.
-              // Relax the clip around the run. Oversized fallback-font symbols
-              // (e.g. dingbats like U+273D pulled from a system symbol font)
-              // carry a near-1em advance that is wider than the mono cell; left-
-              // aligned and clipped to the run's right edge, the glyph's right
-              // half gets shaved ("half" star). Allowing roughly a cell of
-              // overflow on each side — paired with centering oversized glyphs
-              // below — keeps the whole glyph visible, bleeding into the
-              // adjacent (blank, for a spinner) cell rather than clipping. The
-              // outer content-rect clip still bounds the paint. Glyphs that fit
-              // (…, −) stay left-aligned on the baseline, exactly as before.
+              // single-run safety checks). Each glyph goes into its own cells
+              // via `_paintCellGlyph`, on the same baseline the single-run path
+              // uses. The clip is a cell looser than the run, a holdover from
+              // when oversized glyphs overflowed; now only ink past a glyph's
+              // advance reaches it, and the content-rect clip still bounds it.
               canvas.save();
               canvas.clipRect(
                 Rect.fromLTRB(
@@ -5164,59 +5134,38 @@ class _GhosttyTerminalPainter extends CustomPainter {
                     ? graphemeWidths[index]
                     : 1;
                 final cellWidth = widthCells * charWidth;
-                final cellRect = Rect.fromLTRB(
-                  textX,
-                  rowBand.top,
-                  textX + cellWidth,
-                  rowBand.bottom,
-                );
-                if (widthCells == 1 &&
-                    _paintTerminalSpecialGlyph(
-                      canvas,
-                      character,
-                      rect: cellRect,
-                      // Block elements are graphics: their foreground often
-                      // matches a neighbouring cell's background (TUI borders).
-                      // A text contrast floor would turn that fill into a stripe.
-                      color:
-                          character.runes.length == 1 &&
-                              _terminalBlockGlyphSpec(character.runes.first) !=
-                                  null
-                          ? _resolveNativeForeground(
-                              style: run.style,
-                              defaultForeground: defaultForeground,
-                              defaultBackground: defaultBackground,
-                              nativeDefaultForeground: nativeDefaultForeground,
-                              nativeDefaultBackground: nativeDefaultBackground,
-                              metadataColor: _resolveMetadataBackgroundColor(
-                                metadata: run.metadata,
-                                fallback: run.metadataBackground,
-                              ),
-                              hasHyperlink: run.linkClass == _LinkClass.accent,
-                              applyContrast: false,
-                            )
-                          : textForeground,
-                    )) {
-                  textX += cellWidth;
-                  continue;
-                }
-                _debugLogUnsupportedGlyph(character);
-                final painter = TextPainter(
-                  text: TextSpan(
-                    text: character,
-                    style: textStyle.copyWith(letterSpacing: 0),
+                _paintCellGlyph(
+                  canvas,
+                  character,
+                  cellRect: Rect.fromLTRB(
+                    textX,
+                    rowBand.top,
+                    textX + cellWidth,
+                    rowBand.bottom,
                   ),
-                  textDirection: TextDirection.ltr,
-                  maxLines: 1,
-                )..layout();
-                // A glyph wider than its cell (oversized symbol-font fallback)
-                // is centered so it overflows symmetrically into the relaxed
-                // clip instead of being shaved on the right. Glyphs that fit
-                // keep left-aligned baseline placement.
-                final glyphX = painter.width > cellWidth
-                    ? textX + (cellWidth - painter.width) / 2
-                    : textX;
-                painter.paint(canvas, Offset(glyphX, rowBand.top));
+                  widthCells: widthCells,
+                  textStyle: textStyle,
+                  // Block elements are graphics: their foreground often
+                  // matches a neighbouring cell's background (TUI borders).
+                  // A text contrast floor would turn that fill into a stripe.
+                  color:
+                      character.runes.length == 1 &&
+                          _terminalBlockGlyphSpec(character.runes.first) != null
+                      ? _resolveNativeForeground(
+                          style: run.style,
+                          defaultForeground: defaultForeground,
+                          defaultBackground: defaultBackground,
+                          nativeDefaultForeground: nativeDefaultForeground,
+                          nativeDefaultBackground: nativeDefaultBackground,
+                          metadataColor: _resolveMetadataBackgroundColor(
+                            metadata: run.metadata,
+                            fallback: run.metadataBackground,
+                          ),
+                          hasHyperlink: run.linkClass == _LinkClass.accent,
+                          applyContrast: false,
+                        )
+                      : textForeground,
+                );
                 textX += cellWidth;
               }
               canvas.restore();
@@ -5226,6 +5175,70 @@ class _GhosttyTerminalPainter extends CustomPainter {
       }
     }
   }
+
+  /// Paints one grapheme into [cellRect], the [widthCells] cells the engine
+  /// gave it: the custom-painted glyph when one exists for a single cell,
+  /// otherwise the font's glyph fitted by [paintGlyphInCells].
+  void _paintCellGlyph(
+    Canvas canvas,
+    String character, {
+    required Rect cellRect,
+    required int widthCells,
+    required TextStyle textStyle,
+    required Color color,
+  }) {
+    if (widthCells == 1 &&
+        _paintTerminalSpecialGlyph(
+          canvas,
+          character,
+          rect: cellRect,
+          color: color,
+        )) {
+      return;
+    }
+    _debugLogUnsupportedGlyph(character);
+    final glyphStyle = textStyle.copyWith(letterSpacing: 0);
+    final painter = TextPainter(
+      text: TextSpan(text: character, style: glyphStyle),
+      textDirection: TextDirection.ltr,
+      maxLines: 1,
+    )..layout();
+    final slack = _glyphFitSlack(widthCells);
+    final decoration = glyphStyle.decoration;
+    if (decoration != null &&
+        decoration != TextDecoration.none &&
+        !glyphFitsCells(painter.width, cellRect.width, slack: slack)) {
+      // A glyph about to be scaled would scale its underline/strikethrough
+      // with it, thinner and pulled toward the cell's centre, out of line with
+      // its neighbours'. Paint the decoration alone at full size, clipped to
+      // the cells, then the glyph without it.
+      painter.text = TextSpan(
+        text: character,
+        style: glyphStyle.copyWith(
+          color: const Color(0x00000000),
+          decorationColor: glyphStyle.decorationColor ?? color,
+        ),
+      );
+      painter.layout();
+      canvas.save();
+      canvas.clipRect(cellRect);
+      painter.paint(canvas, cellRect.topLeft);
+      canvas.restore();
+      painter.text = TextSpan(
+        text: character,
+        style: glyphStyle.copyWith(decoration: TextDecoration.none),
+      );
+      painter.layout();
+    }
+    paintGlyphInCells(canvas, painter, cellRect, slack: slack);
+    painter.dispose();
+  }
+
+  /// How far a glyph [cells] wide may overrun its cells and still count as
+  /// fitting: the amount the font's natural advance exceeds the snapped cell
+  /// width, which `letterSpacing` compensates for (negatively) in runs.
+  double _glyphFitSlack(int cells) =>
+      math.max(1, cells) * math.max(0.0, -letterSpacing);
 
   void _paintNativeCursor(
     Canvas canvas, {
@@ -5480,7 +5493,7 @@ class _GhosttyTerminalPainter extends CustomPainter {
   /// painters: the glyph is left-aligned on the row baseline (`height`
   /// positions the baseline inside the line box) so it lands exactly on top of
   /// the glyph it replaces, and only an oversized fallback glyph — one that
-  /// measures wider than its own cell — is centered instead.
+  /// measures wider than its own cell — is scaled into it instead.
   void _paintCursorGlyph(
     Canvas canvas, {
     required String text,
@@ -5503,7 +5516,7 @@ class _GhosttyTerminalPainter extends CustomPainter {
           text: text,
           // Unconstrained, like the run painters' per-glyph fallback: an
           // oversized fallback glyph has to measure wider than its cell for
-          // the centering below to notice it.
+          // `paintGlyphInCells` to notice it.
           width: double.infinity,
           fontSize: fontSize,
           lineHeight: linePixels / fontSize,
@@ -5519,10 +5532,20 @@ class _GhosttyTerminalPainter extends CustomPainter {
           decorationColor: color,
         ),
       );
-      final glyphX = painter.width > cellRect.width
-          ? cellRect.left + ((cellRect.width - painter.width) / 2)
-          : cellRect.left;
-      painter.paint(canvas, Offset(glyphX, cellRect.top));
+      // Fit against the grapheme's own cells, not the cursor body: a block on
+      // the head of a wide cell covers one column, and the glyph must keep the
+      // size of the one underneath it (only its covered half shows).
+      paintGlyphInCells(
+        canvas,
+        painter,
+        Rect.fromLTWH(
+          cellRect.left,
+          cellRect.top,
+          math.max(cellRect.width, math.max(1, cells) * charWidth),
+          cellRect.height,
+        ),
+        slack: _glyphFitSlack(cells),
+      );
     }
     canvas.restore();
   }
@@ -6170,10 +6193,7 @@ class _GhosttyTerminalPainter extends CustomPainter {
           color: color,
         ) ||
         _paintTerminalBlockGlyph(canvas, text, rect: rect, color: color) ||
-        _paintTerminalBrailleGlyph(canvas, text, rect: rect, color: color) ||
-        _paintTerminalGeometricGlyph(canvas, text, rect: rect, color: color) ||
-        _paintTerminalRaisedTextGlyph(canvas, text, rect: rect, color: color) ||
-        _paintTerminalSymbolGlyph(canvas, text, rect: rect, color: color);
+        _paintTerminalBrailleGlyph(canvas, text, rect: rect, color: color);
   }
 
   bool _paintTerminalBoxDrawingGlyph(
@@ -6364,302 +6384,6 @@ class _GhosttyTerminalPainter extends CustomPainter {
     return true;
   }
 
-  bool _paintTerminalGeometricGlyph(
-    Canvas canvas,
-    String text, {
-    required Rect rect,
-    required Color color,
-  }) {
-    final rune = text.runes.length == 1 ? text.runes.first : null;
-    if (rune == null) {
-      return false;
-    }
-
-    final spec = _terminalGeometricGlyphSpec(rune);
-    if (spec == null) {
-      return false;
-    }
-
-    final diameter = math.min(rect.width, rect.height) * spec.diameterScale;
-    final glyphRect = Rect.fromCenter(
-      center: Offset(
-        rect.left + (rect.width / 2),
-        rect.top + (rect.height / 2),
-      ),
-      width: diameter,
-      height: diameter,
-    );
-    final paint = Paint()
-      ..color = color
-      ..style = spec.filled ? PaintingStyle.fill : PaintingStyle.stroke
-      ..strokeWidth = spec.filled
-          ? 0
-          : math.max(1.0, diameter * spec.strokeScale)
-      ..isAntiAlias = true;
-    canvas.drawOval(glyphRect, paint);
-    return true;
-  }
-
-  bool _paintTerminalRaisedTextGlyph(
-    Canvas canvas,
-    String text, {
-    required Rect rect,
-    required Color color,
-  }) {
-    final rune = text.runes.length == 1 ? text.runes.first : null;
-    if (rune == null) {
-      return false;
-    }
-
-    final spec = _terminalRaisedTextGlyphSpec(rune);
-    if (spec == null) {
-      return false;
-    }
-
-    final painter = TextPainter(
-      text: TextSpan(
-        text: spec.text,
-        style: TextStyle(
-          color: color,
-          fontFamily: fontFamily,
-          fontFamilyFallback: fontFamilyFallback,
-          package: fontPackage,
-          fontSize: fontSize * spec.fontScale,
-          height: 1,
-          letterSpacing: letterSpacing,
-          fontWeight: FontWeight.w500,
-        ),
-      ),
-      textDirection: TextDirection.ltr,
-      maxLines: 1,
-    )..layout();
-
-    final dx = rect.left + _centeredGlyphOffset(rect.width, painter.width);
-    final dy =
-        rect.top +
-        (rect.height * spec.topOffsetScale) +
-        _centeredGlyphOffset(
-          rect.height * spec.verticalSpaceScale,
-          painter.height,
-        );
-    painter.paint(canvas, Offset(dx, dy));
-    return true;
-  }
-
-  bool _paintTerminalSymbolGlyph(
-    Canvas canvas,
-    String text, {
-    required Rect rect,
-    required Color color,
-  }) {
-    final rune = text.runes.length == 1 ? text.runes.first : null;
-    if (rune == null) {
-      return false;
-    }
-
-    final spec = _terminalSymbolGlyphSpec(rune);
-    if (spec == null) {
-      return false;
-    }
-
-    final left = _snapLogicalToPhysical(rect.left, devicePixelRatio);
-    final right = _snapLogicalToPhysical(rect.right, devicePixelRatio);
-    final top = _snapLogicalToPhysical(rect.top, devicePixelRatio);
-    final bottom = _snapLogicalToPhysical(rect.bottom, devicePixelRatio);
-    final width = right - left;
-    final height = bottom - top;
-    final strokeWidth = math.max(
-      1.0 / math.max(devicePixelRatio, 1.0),
-      math.min(width, height) * spec.strokeScale,
-    );
-    final centerX = _pixelSnapAxis(
-      rect.left + (rect.width / 2),
-      strokeWidth,
-      devicePixelRatio: devicePixelRatio,
-    );
-    final centerY = _pixelSnapAxis(
-      rect.top + (rect.height / 2),
-      strokeWidth,
-      devicePixelRatio: devicePixelRatio,
-    );
-    final paint = Paint()
-      ..color = color
-      ..style = spec.filled ? PaintingStyle.fill : PaintingStyle.stroke
-      ..strokeWidth = strokeWidth
-      ..strokeCap = StrokeCap.round
-      ..strokeJoin = StrokeJoin.round
-      ..isAntiAlias = true;
-
-    switch (spec.kind) {
-      case _TerminalSymbolGlyphKind.downTriangle:
-        final path = Path()
-          ..moveTo(centerX, top + (height * 0.8))
-          ..lineTo(left + (width * 0.22), top + (height * 0.28))
-          ..lineTo(right - (width * 0.22), top + (height * 0.28))
-          ..close();
-        canvas.drawPath(path, paint);
-        return true;
-      case _TerminalSymbolGlyphKind.upTriangle:
-        final path = Path()
-          ..moveTo(centerX, top + (height * 0.2))
-          ..lineTo(left + (width * 0.22), bottom - (height * 0.28))
-          ..lineTo(right - (width * 0.22), bottom - (height * 0.28))
-          ..close();
-        canvas.drawPath(path, paint);
-        return true;
-      case _TerminalSymbolGlyphKind.leftTriangle:
-        final path = Path()
-          ..moveTo(left + (width * 0.2), centerY)
-          ..lineTo(right - (width * 0.28), top + (height * 0.22))
-          ..lineTo(right - (width * 0.28), bottom - (height * 0.22))
-          ..close();
-        canvas.drawPath(path, paint);
-        return true;
-      case _TerminalSymbolGlyphKind.rightTriangle:
-        final path = Path()
-          ..moveTo(right - (width * 0.2), centerY)
-          ..lineTo(left + (width * 0.28), top + (height * 0.22))
-          ..lineTo(left + (width * 0.28), bottom - (height * 0.22))
-          ..close();
-        canvas.drawPath(path, paint);
-        return true;
-      case _TerminalSymbolGlyphKind.square:
-        final insetX = width * 0.2;
-        final insetY = height * 0.2;
-        canvas.drawRect(
-          Rect.fromLTRB(
-            left + insetX,
-            top + insetY,
-            right - insetX,
-            bottom - insetY,
-          ),
-          paint,
-        );
-        return true;
-      case _TerminalSymbolGlyphKind.rightArrow:
-        final startX = left + (width * 0.18);
-        final endX = right - (width * 0.22);
-        final arrowTopY = centerY - (height * 0.18);
-        final arrowBottomY = centerY + (height * 0.18);
-        canvas.drawLine(Offset(startX, centerY), Offset(endX, centerY), paint);
-        canvas.drawLine(
-          Offset(endX - (width * 0.18), arrowTopY),
-          Offset(endX, centerY),
-          paint,
-        );
-        canvas.drawLine(
-          Offset(endX - (width * 0.18), arrowBottomY),
-          Offset(endX, centerY),
-          paint,
-        );
-        return true;
-      case _TerminalSymbolGlyphKind.leftArrow:
-        final startX = right - (width * 0.18);
-        final endX = left + (width * 0.22);
-        final arrowTopY = centerY - (height * 0.18);
-        final arrowBottomY = centerY + (height * 0.18);
-        canvas.drawLine(Offset(startX, centerY), Offset(endX, centerY), paint);
-        canvas.drawLine(
-          Offset(endX + (width * 0.18), arrowTopY),
-          Offset(endX, centerY),
-          paint,
-        );
-        canvas.drawLine(
-          Offset(endX + (width * 0.18), arrowBottomY),
-          Offset(endX, centerY),
-          paint,
-        );
-        return true;
-      case _TerminalSymbolGlyphKind.upArrow:
-        final startY = bottom - (height * 0.18);
-        final endY = top + (height * 0.22);
-        final arrowLeftX = centerX - (width * 0.18);
-        final arrowRightX = centerX + (width * 0.18);
-        canvas.drawLine(Offset(centerX, startY), Offset(centerX, endY), paint);
-        canvas.drawLine(
-          Offset(arrowLeftX, endY + (height * 0.18)),
-          Offset(centerX, endY),
-          paint,
-        );
-        canvas.drawLine(
-          Offset(arrowRightX, endY + (height * 0.18)),
-          Offset(centerX, endY),
-          paint,
-        );
-        return true;
-      case _TerminalSymbolGlyphKind.downArrow:
-        final startY = top + (height * 0.18);
-        final endY = bottom - (height * 0.22);
-        final arrowLeftX = centerX - (width * 0.18);
-        final arrowRightX = centerX + (width * 0.18);
-        canvas.drawLine(Offset(centerX, startY), Offset(centerX, endY), paint);
-        canvas.drawLine(
-          Offset(arrowLeftX, endY - (height * 0.18)),
-          Offset(centerX, endY),
-          paint,
-        );
-        canvas.drawLine(
-          Offset(arrowRightX, endY - (height * 0.18)),
-          Offset(centerX, endY),
-          paint,
-        );
-        return true;
-      case _TerminalSymbolGlyphKind.checkmark:
-        final path = Path()
-          ..moveTo(left + (width * 0.18), top + (height * 0.56))
-          ..lineTo(left + (width * 0.42), top + (height * 0.78))
-          ..lineTo(right - (width * 0.16), top + (height * 0.24));
-        canvas.drawPath(path, paint);
-        return true;
-      case _TerminalSymbolGlyphKind.enterArrow:
-        final midX = right - (width * 0.26);
-        final hookY = centerY + (height * 0.18);
-        canvas.drawLine(
-          Offset(left + (width * 0.16), centerY),
-          Offset(midX, centerY),
-          paint,
-        );
-        canvas.drawLine(
-          Offset(midX, top + (height * 0.22)),
-          Offset(midX, hookY),
-          paint,
-        );
-        canvas.drawLine(
-          Offset(midX, hookY),
-          Offset(midX - (width * 0.18), hookY - (height * 0.16)),
-          paint,
-        );
-        canvas.drawLine(
-          Offset(midX, hookY),
-          Offset(midX - (width * 0.18), hookY + (height * 0.16)),
-          paint,
-        );
-        return true;
-      case _TerminalSymbolGlyphKind.emDash:
-        canvas.drawLine(
-          Offset(left + (width * 0.12), centerY),
-          Offset(right - (width * 0.12), centerY),
-          paint,
-        );
-        return true;
-      case _TerminalSymbolGlyphKind.heavyRightArrow:
-        // Heavy round-tipped rightwards arrow (➜ U+279C).
-        // Drawn as a solid filled chevron: a left-indented pentagon centred
-        // vertically in the cell — no stem, just the broad arrowhead.
-        final path = Path()
-          ..moveTo(right - (width * 0.18), centerY) // rightmost tip
-          ..lineTo(left + (width * 0.28), top + (height * 0.18)) // top-left
-          ..lineTo(left + (width * 0.48), centerY) // centre indent
-          ..lineTo(
-            left + (width * 0.28),
-            bottom - (height * 0.18),
-          ) // bottom-left
-          ..close();
-        canvas.drawPath(path, paint);
-        return true;
-    }
-  }
-
   bool _paintTerminalBrailleGlyph(
     Canvas canvas,
     String text, {
@@ -6771,13 +6495,6 @@ class _GhosttyTerminalPainter extends CustomPainter {
   }
 }
 
-double _centeredGlyphOffset(double availableExtent, double glyphExtent) {
-  if (availableExtent <= glyphExtent) {
-    return 0;
-  }
-  return (availableExtent - glyphExtent) / 2;
-}
-
 final Set<int> _loggedUnsupportedTerminalRunes = <int>{};
 
 void _debugLogUnsupportedGlyph(String text) {
@@ -6791,9 +6508,6 @@ void _debugLogUnsupportedGlyph(String text) {
       if (rune <= 0x7E ||
           _terminalBoxDrawingSpec(rune) != null ||
           _terminalBlockGlyphSpec(rune) != null ||
-          _terminalGeometricGlyphSpec(rune) != null ||
-          _terminalRaisedTextGlyphSpec(rune) != null ||
-          _terminalSymbolGlyphSpec(rune) != null ||
           (rune >= 0x2800 && rune <= 0x28FF)) {
         return true;
       }
@@ -7519,156 +7233,6 @@ final class _TerminalBoxDrawingSpec {
   final bool heavyHorizontal;
   final bool heavyVertical;
   final bool rounded;
-}
-
-_TerminalGeometricGlyphSpec? _terminalGeometricGlyphSpec(int rune) =>
-    switch (rune) {
-      0x00B0 => const _TerminalGeometricGlyphSpec(
-        diameterScale: 0.42,
-        strokeScale: 0.12,
-      ),
-      0x25CB || 0x25EF => const _TerminalGeometricGlyphSpec(
-        diameterScale: 0.88,
-        strokeScale: 0.12,
-      ),
-      0x25E6 => const _TerminalGeometricGlyphSpec(
-        diameterScale: 0.4,
-        strokeScale: 0.14,
-      ),
-      0x25CF || 0x25C9 => const _TerminalGeometricGlyphSpec(
-        filled: true,
-        diameterScale: 0.58,
-      ),
-      _ => null,
-    };
-
-final class _TerminalGeometricGlyphSpec {
-  const _TerminalGeometricGlyphSpec({
-    this.filled = false,
-    required this.diameterScale,
-    this.strokeScale = 0.14,
-  });
-
-  final bool filled;
-  final double diameterScale;
-  final double strokeScale;
-}
-
-_TerminalRaisedTextGlyphSpec? _terminalRaisedTextGlyphSpec(int rune) =>
-    switch (rune) {
-      0x2070 => const _TerminalRaisedTextGlyphSpec(text: '0'),
-      0x00B9 => const _TerminalRaisedTextGlyphSpec(text: '1'),
-      0x00B2 => const _TerminalRaisedTextGlyphSpec(text: '2'),
-      0x00B3 => const _TerminalRaisedTextGlyphSpec(text: '3'),
-      0x2075 => const _TerminalRaisedTextGlyphSpec(text: '5'),
-      0x2076 => const _TerminalRaisedTextGlyphSpec(text: '6'),
-      0x2077 => const _TerminalRaisedTextGlyphSpec(text: '7'),
-      0x2078 => const _TerminalRaisedTextGlyphSpec(text: '8'),
-      0x2079 => const _TerminalRaisedTextGlyphSpec(text: '9'),
-      0x207A => const _TerminalRaisedTextGlyphSpec(text: '+'),
-      0x207B => const _TerminalRaisedTextGlyphSpec(text: '-'),
-      0x2074 => const _TerminalRaisedTextGlyphSpec(text: '4'),
-      _ => null,
-    };
-
-final class _TerminalRaisedTextGlyphSpec {
-  const _TerminalRaisedTextGlyphSpec({required this.text});
-
-  final String text;
-  final double fontScale = 0.7;
-  final double topOffsetScale = 0.02;
-  final double verticalSpaceScale = 0.72;
-}
-
-_TerminalSymbolGlyphSpec? _terminalSymbolGlyphSpec(int rune) => switch (rune) {
-  0x25C0 => const _TerminalSymbolGlyphSpec(
-    kind: _TerminalSymbolGlyphKind.leftTriangle,
-    filled: true,
-    strokeScale: 0.1,
-  ),
-  0x25B6 => const _TerminalSymbolGlyphSpec(
-    kind: _TerminalSymbolGlyphKind.rightTriangle,
-    filled: true,
-    strokeScale: 0.1,
-  ),
-  0x25B2 => const _TerminalSymbolGlyphSpec(
-    kind: _TerminalSymbolGlyphKind.upTriangle,
-    filled: true,
-    strokeScale: 0.1,
-  ),
-  0x25BC => const _TerminalSymbolGlyphSpec(
-    kind: _TerminalSymbolGlyphKind.downTriangle,
-    filled: true,
-    strokeScale: 0.1,
-  ),
-  0x25A0 => const _TerminalSymbolGlyphSpec(
-    kind: _TerminalSymbolGlyphKind.square,
-    filled: true,
-    strokeScale: 0.1,
-  ),
-  0x2190 => const _TerminalSymbolGlyphSpec(
-    kind: _TerminalSymbolGlyphKind.leftArrow,
-    strokeScale: 0.12,
-  ),
-  0x2192 => const _TerminalSymbolGlyphSpec(
-    kind: _TerminalSymbolGlyphKind.rightArrow,
-    strokeScale: 0.12,
-  ),
-  0x2191 => const _TerminalSymbolGlyphSpec(
-    kind: _TerminalSymbolGlyphKind.upArrow,
-    strokeScale: 0.12,
-  ),
-  0x2193 => const _TerminalSymbolGlyphSpec(
-    kind: _TerminalSymbolGlyphKind.downArrow,
-    strokeScale: 0.12,
-  ),
-  0x21B5 => const _TerminalSymbolGlyphSpec(
-    kind: _TerminalSymbolGlyphKind.enterArrow,
-    strokeScale: 0.12,
-  ),
-  0x2713 => const _TerminalSymbolGlyphSpec(
-    kind: _TerminalSymbolGlyphKind.checkmark,
-    strokeScale: 0.14,
-  ),
-  0x2014 => const _TerminalSymbolGlyphSpec(
-    kind: _TerminalSymbolGlyphKind.emDash,
-    strokeScale: 0.1,
-  ),
-  // Heavy round-tipped rightwards arrow (U+279C) — common in zsh prompts.
-  0x279C => const _TerminalSymbolGlyphSpec(
-    kind: _TerminalSymbolGlyphKind.heavyRightArrow,
-    filled: true,
-    strokeScale: 0.1,
-  ),
-  _ => null,
-};
-
-enum _TerminalSymbolGlyphKind {
-  upTriangle,
-  downTriangle,
-  leftTriangle,
-  rightTriangle,
-  square,
-  leftArrow,
-  rightArrow,
-  upArrow,
-  downArrow,
-  enterArrow,
-  checkmark,
-  emDash,
-  heavyRightArrow,
-}
-
-final class _TerminalSymbolGlyphSpec {
-  const _TerminalSymbolGlyphSpec({
-    required this.kind,
-    required this.strokeScale,
-    this.filled = false,
-  });
-
-  final _TerminalSymbolGlyphKind kind;
-  final double strokeScale;
-  final bool filled;
 }
 
 // The four cell quadrants as fraction rects, reused by the quadrant block

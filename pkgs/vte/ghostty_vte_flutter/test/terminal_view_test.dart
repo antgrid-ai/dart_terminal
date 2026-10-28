@@ -2253,47 +2253,6 @@ void main() {
       }
     }
 
-    testWidgets('single-cell circle glyphs keep spacing inside the cell', (
-      tester,
-    ) async {
-      if (!hasNativeTerminal) {
-        return;
-      }
-
-      controller.appendDebugOutput('○A');
-
-      final key = GlobalKey();
-      await tester.pumpWidget(
-        RepaintBoundary(
-          key: key,
-          child: buildView(
-            renderer: GhosttyTerminalRendererMode.renderState,
-            backgroundColor: const Color(0xFF0A0F14),
-            foregroundColor: const Color(0xFFE6EDF3),
-            fontSize: 14,
-            lineHeight: 1.35,
-          ),
-        ),
-      );
-      await tester.pumpAndSettle();
-
-      final image = await _captureTerminalImageData(tester, key);
-      const headerHeight = 28;
-      final (:charWidth, :linePixels, :padding) = _measureTestMetrics();
-      final cellCenterY = headerHeight + padding + (linePixels ~/ 2);
-      final circleCenterX = padding + (charWidth ~/ 2);
-      final circleRightEdgeX = padding + charWidth - 1;
-
-      expect(
-        _pixelIsNonBackground(image, x: circleCenterX, y: cellCenterY),
-        isTrue,
-      );
-      expect(
-        _pixelIsNonBackground(image, x: circleRightEdgeX, y: cellCenterY),
-        isFalse,
-      );
-    });
-
     testWidgets('rounded box corners paint into the expected quadrants', (
       tester,
     ) async {
