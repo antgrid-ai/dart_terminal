@@ -993,10 +993,11 @@ void main() {
 
       final webLike = _FormatterOnlyController();
       addTearDown(webLike.dispose);
-      // Every visible column holds a glyph, so this asserts the cursor reveals
-      // whatever it landed on without depending on where that is: with no
-      // engine snapshot the column comes from the formatter's own VT parse.
-      webLike.appendDebugOutput('X' * 200);
+      // Step back onto the run so the cursor sits on a glyph whatever width
+      // the view reflows to; left at the end it would sit on the blank cell
+      // after the text. With no engine snapshot the column comes from the
+      // formatter's own VT parse.
+      webLike.appendDebugOutput('${'X' * 200}\x1b[3D');
 
       final key = GlobalKey();
       await tester.pumpWidget(
