@@ -4,6 +4,9 @@
 
 - `maxScrollback` is a row limit and defaults to `maxLines`;
   `maxScrollbackLines` is removed.
+- A host `onOpenHyperlink` callback again receives every URI and owns the
+  scheme policy; upstream's HTTP(S)-only check now guards just the platform
+  launcher fallback, so hosts can route their own schemes.
 
 - Added optional mouse-motion coalescing with `mouseMotionReportInterval` and
   explicit flush/cancellation hooks for host lifecycle changes.

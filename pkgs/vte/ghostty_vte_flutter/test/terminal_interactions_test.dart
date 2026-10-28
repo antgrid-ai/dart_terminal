@@ -153,17 +153,24 @@ void main() {
       expect(ghosttyTerminalIsAllowedHyperlink('not a uri'), isFalse);
     });
 
-    test('hyperlink opener rejects unsafe schemes before callbacks', () async {
-      var callbackInvoked = false;
+    test(
+      'hyperlink opener leaves the scheme policy to a host callback',
+      () async {
+        // The host routes its own schemes (Antgrid's in-app file links) and
+        // decides what to refuse; only the launcher fallback filters schemes.
+        final opened = <String>[];
+        for (final uri in [
+          'file:///etc/passwd',
+          'antgrid-path:?p=src%2Fa.ts',
+        ]) {
+          await ghosttyTerminalOpenHyperlink(
+            uri,
+            onOpenHyperlink: (uri) async => opened.add(uri),
+          );
+        }
 
-      await ghosttyTerminalOpenHyperlink(
-        'file:///etc/passwd',
-        onOpenHyperlink: (_) async {
-          callbackInvoked = true;
-        },
-      );
-
-      expect(callbackInvoked, isFalse);
-    });
+        expect(opened, ['file:///etc/passwd', 'antgrid-path:?p=src%2Fa.ts']);
+      },
+    );
   });
 }

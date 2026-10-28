@@ -59,20 +59,22 @@ bool ghosttyTerminalIsAllowedHyperlink(String uri) {
   return scheme == 'http' || scheme == 'https';
 }
 
-/// Opens an HTTP(S) terminal hyperlink using a host callback when provided.
+/// Opens a terminal hyperlink, through the host callback when one is given.
 ///
-/// Unsupported or malformed URI schemes are ignored before invoking either
-/// the callback or the platform launcher.
+/// A host callback receives every URI and owns the scheme policy: hosts route
+/// their own schemes (in-app file links, say) and choose what to refuse and
+/// how to tell the user. Only the platform launcher fallback, which has no
+/// policy of its own, is restricted to [ghosttyTerminalIsAllowedHyperlink].
 Future<void> ghosttyTerminalOpenHyperlink(
   String uri, {
   Future<void> Function(String uri)? onOpenHyperlink,
 }) async {
-  if (!ghosttyTerminalIsAllowedHyperlink(uri)) {
-    return;
-  }
   final callback = onOpenHyperlink;
   if (callback != null) {
     await callback(uri);
+    return;
+  }
+  if (!ghosttyTerminalIsAllowedHyperlink(uri)) {
     return;
   }
   await launchUrlString(uri);
