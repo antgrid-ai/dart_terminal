@@ -4,13 +4,17 @@ description: >-
   Spawns shell subprocesses on Linux, macOS, Windows, and Android, links native
   assets into supported iOS builds, and connects through WebSocket or
   WebTransport to a remote PTY server on web.
-# Build metadata, not a version bump: the Dart API is upstream's 0.0.6, but the
-# Android native libraries are rebuilt 16 KB-aligned, so the shipped bytes are
-# not upstream's. Build metadata is ignored for constraint solving, so `^0.0.6`
-# consumers are unaffected — which is why this cannot be `-antgrid.1`, a semver
-# pre-release that `^0.0.6` would refuse. The release tag carries the same
-# suffix; see native_prebuilt.yaml for why it must not use a dash either.
-version: 0.0.6+antgrid.2
+# Upstream's 0.0.7-beta.2 Dart API plus `+antgrid.N` build metadata: the native
+# libraries this fork ships are its own (iOS dylibs rather than upstream's
+# static archives), so the bytes are not upstream's. Build metadata is ignored
+# for constraint solving, so `^0.0.7-beta.2` consumers are unaffected.
+#
+# The prebuilts are still the `portable_pty-v0.0.6+antgrid.2` release (see
+# native_prebuilt.yaml): the Rust crate is unchanged since then. Before tagging
+# a release from this version, fix the release job's dash check — this version
+# contains a dash, so it would be classed a prerelease and skip the lockfile
+# and asset-hash jobs.
+version: 0.0.7-beta.2+antgrid.1
 
 repository: https://github.com/antgrid-ai/dart_terminal/tree/master/pkgs/pty/portable_pty
 homepage: https://github.com/antgrid-ai/dart_terminal
@@ -24,7 +28,7 @@ topics:
   - process
 
 environment:
-  sdk: ^3.10.4
+  sdk: ^3.13.0
 
 executables:
   setup: setup
@@ -32,13 +36,13 @@ executables:
 resolution: workspace
 
 dependencies:
-  code_assets: ^1.0.0
+  code_assets: ^2.0.0
   ffi: ^2.2.0
-  hooks: ^2.1.0
-  native_prebuilt: ^0.4.0
+  hooks: ^2.2.0
+  native_prebuilt: ^0.5.0
   web: ^1.1.1
 
 dev_dependencies:
   ffigen: ^20.1.1
   flutter_lints: ^6.0.0
-  test: ^1.25.8
+  test: ^1.31.1

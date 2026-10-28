@@ -1,6 +1,7 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/painting.dart';
 import 'package:ghostty_vte/ghostty_vte.dart';
+
 import 'terminal_snapshot.dart';
 
 /// Applies the SGR 2 "faint/dim" attribute by blending the foreground toward
@@ -569,6 +570,103 @@ final class GhosttyTerminalRenderCursor {
   final Color? color;
 }
 
+/// Paint layer for a Kitty Graphics placement.
+enum GhosttyTerminalKittyPlacementLayer {
+  /// Behind explicit terminal cell backgrounds.
+  belowBackground,
+
+  /// Above cell backgrounds and below terminal glyphs.
+  belowText,
+
+  /// Above terminal glyphs.
+  aboveText,
+}
+
+/// Immutable RGBA pixels copied from Ghostty's borrowed Kitty image storage.
+@immutable
+final class GhosttyTerminalKittyImage {
+  const GhosttyTerminalKittyImage({
+    required this.id,
+    required this.generation,
+    required this.width,
+    required this.height,
+    required this.rgba,
+  });
+
+  /// Kitty protocol image identifier.
+  final int id;
+
+  /// Content generation used to invalidate decoded Flutter image caches.
+  final int generation;
+
+  /// Source image width in pixels.
+  final int width;
+
+  /// Source image height in pixels.
+  final int height;
+
+  /// Copied, uncompressed RGBA8888 pixels.
+  ///
+  /// Ghostty exposes a borrowed buffer that becomes invalid after terminal
+  /// mutation. The controller copies and normalizes it before publishing this
+  /// snapshot.
+  final Uint8List rgba;
+}
+
+/// Render geometry for a visible Kitty Graphics placement.
+@immutable
+final class GhosttyTerminalKittyPlacement {
+  const GhosttyTerminalKittyPlacement({
+    required this.imageId,
+    required this.imageGeneration,
+    required this.placementId,
+    required this.layer,
+    required this.z,
+    required this.viewportCol,
+    required this.viewportRow,
+    required this.gridCols,
+    required this.gridRows,
+    required this.sourceX,
+    required this.sourceY,
+    required this.sourceWidth,
+    required this.sourceHeight,
+    this.isVirtual = false,
+    this.virtualSourceCol = 0,
+    this.virtualSourceRow = 0,
+    this.virtualPlacementCols = 0,
+    this.virtualPlacementRows = 0,
+  });
+
+  final int imageId;
+  final int imageGeneration;
+  final int placementId;
+  final GhosttyTerminalKittyPlacementLayer layer;
+  final int z;
+  final int viewportCol;
+  final int viewportRow;
+  final int gridCols;
+  final int gridRows;
+  final int sourceX;
+  final int sourceY;
+  final int sourceWidth;
+  final int sourceHeight;
+
+  /// Whether this placement was reconstructed from Kitty Unicode placeholders.
+  final bool isVirtual;
+
+  /// Source column within the virtual placement grid.
+  final int virtualSourceCol;
+
+  /// Source row within the virtual placement grid.
+  final int virtualSourceRow;
+
+  /// Configured width of the parent virtual placement grid, or zero for auto.
+  final int virtualPlacementCols;
+
+  /// Configured height of the parent virtual placement grid, or zero for auto.
+  final int virtualPlacementRows;
+}
+
 /// High-fidelity visible render-state snapshot from Ghostty.
 @immutable
 final class GhosttyTerminalRenderSnapshot {
@@ -580,6 +678,10 @@ final class GhosttyTerminalRenderSnapshot {
     required this.foregroundColor,
     required this.cursor,
     required this.rowsData,
+    this.kittyImages = const <int, GhosttyTerminalKittyImage>{},
+    this.kittyPlacements = const <GhosttyTerminalKittyPlacement>[],
+    this.hasUnresolvedKittyVirtualPlacements = false,
+    this.hasBlinkingText = false,
   });
 
   /// The visible viewport width in cells.
@@ -602,6 +704,22 @@ final class GhosttyTerminalRenderSnapshot {
 
   /// The visible render rows.
   final List<GhosttyTerminalRenderRow> rowsData;
+
+  /// Copied Kitty image pixels keyed by protocol image ID.
+  final Map<int, GhosttyTerminalKittyImage> kittyImages;
+
+  /// Visible Kitty placements in Ghostty z-order.
+  final List<GhosttyTerminalKittyPlacement> kittyPlacements;
+
+  /// Whether any Kitty Unicode placeholder could not be matched to an image
+  /// placement and was therefore skipped.
+  final bool hasUnresolvedKittyVirtualPlacements;
+
+  /// Whether any cell in [rowsData] has SGR 5 (blink) set.
+  ///
+  /// Recorded while the rows are built, so the view can decide whether to run
+  /// its blink timer without rescanning every cell on each notification.
+  final bool hasBlinkingText;
 
   /// Whether this snapshot contains row data for the current viewport.
   bool get hasViewportData => rowsData.isNotEmpty;

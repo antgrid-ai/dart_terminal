@@ -2,10 +2,40 @@
 
 ## Unreleased
 
+- `maxScrollback` is a row limit and defaults to `maxLines`;
+  `maxScrollbackLines` is removed.
+- A host `onOpenHyperlink` callback again receives every URI and owns the
+  scheme policy; upstream's HTTP(S)-only check now guards just the platform
+  launcher fallback, so hosts can route their own schemes.
+
 - Added optional mouse-motion coalescing with `mouseMotionReportInterval` and
   explicit flush/cancellation hooks for host lifecycle changes.
 - Preserved cell deduplication across motion reports and kept non-motion input
   immediate while retaining input order.
+## 0.2.0-beta.2
+
+- Updated `ghostty_vte` to `^0.2.0-beta.2` and `portable_pty` to
+  `^0.0.7-beta.2`, using their hosted native-prebuilt release assets.
+- Added native Kitty Graphics rendering for direct and Unicode virtual
+  placements, including synchronous PNG decoding, copied RGBA snapshots,
+  generation-aware Flutter image caching, virtual-placeholder reconstruction,
+  source cropping, and Ghostty-compatible paint layers.
+- Honored Ghostty's native cursor color when `cursorColor` is not overridden,
+  and added cursor and styled-text blinking.
+- Aligned the initial web title with native behavior and added the complete
+  Chrome test suite to CI.
+
+## 0.2.0-beta.1
+
+- Raised the minimum Dart SDK to 3.13.
+- Updated the bundled Ghostty VTE Wasm module to `f2d5758f6` and added a CI
+  smoke test for the terminal/formatter ABI.
+- Bumped the `ghostty_vte` dependency to `^0.2.0-beta.1` for the new Kitty
+  Graphics Protocol wrapper APIs.
+- Exposed Ghostty VT build information and selection-scoped terminal
+  formatting through `GhosttyTerminalController`.
+- Improved explicit OSC 8 hyperlink hit testing by resolving hyperlink URIs
+  from native grid references before falling back to URL detection.
 
 ## 0.1.4
 

@@ -20,7 +20,7 @@ class GhosttyTerminalController extends ChangeNotifier
     implements GhosttyTerminalSessionController {
   GhosttyTerminalController({
     this.maxLines = 2000,
-    this.maxScrollback = 10_000,
+    int? maxScrollback,
     this.initialCols = 80,
     this.initialRows = 24,
     this.preferPty = true,
@@ -28,16 +28,18 @@ class GhosttyTerminalController extends ChangeNotifier
     this.mouseMotionReportInterval = Duration.zero,
   }) : assert(!mouseMotionReportInterval.isNegative),
        assert(maxLines > 0),
-       assert(maxScrollback >= 0),
+       assert(maxScrollback == null || maxScrollback >= 0),
        assert(initialCols > 0),
        assert(initialRows > 0),
+       maxScrollback = maxScrollback ?? maxLines,
        _cols = initialCols,
        _rows = initialRows;
 
   /// Maximum retained line count in the formatted terminal snapshot.
   final int maxLines;
 
-  /// Maximum terminal scrollback depth retained by [VtTerminal].
+  /// Maximum scrollback the engine retains, in rows. Defaults to [maxLines],
+  /// as on native.
   final int maxScrollback;
 
   /// Initial terminal width in cells before the view reports a real size.
@@ -81,9 +83,10 @@ class GhosttyTerminalController extends ChangeNotifier
   final List<String> _lines = <String>[''];
   String _plainText = '';
   GhosttyTerminalSnapshot _snapshot = const GhosttyTerminalSnapshot.empty();
-  String _title = 'Terminal (Web)';
+  String _title = 'Terminal';
   bool _running = false;
   int _revision = 0;
+  bool _viewportFollowingBottom = true;
   int _cols;
   int _rows;
 
@@ -107,6 +110,12 @@ class GhosttyTerminalController extends ChangeNotifier
   @override
   int get rows => _rows;
 
+  /// Build information for the compiled Ghostty VT library.
+  ///
+  /// Includes SIMD availability, Kitty graphics support, tmux control-mode
+  /// support, optimization level, and version information.
+  VtBuildInfo get buildInfo => GhosttyVt.buildInfo;
+
   /// Live VT terminal state backing this controller.
   VtTerminal get terminal => _ensureTerminal();
 
@@ -118,6 +127,47 @@ class GhosttyTerminalController extends ChangeNotifier
 
   /// Web does not expose a native Ghostty render-state snapshot.
   GhosttyTerminalRenderSnapshot? get renderSnapshot => null;
+
+  /// Whether the viewport was last asked to follow the live bottom.
+  ///
+  /// Web has no engine viewport to read back, so this records the latest
+  /// request from the scroll methods below.
+  bool get isViewportAtBottom => _viewportFollowingBottom;
+
+  /// Always null on web: the wasm engine does not report scrollbar geometry.
+  ///
+  /// [GhosttyTerminalView] then sizes and scrolls the formatter [snapshot]
+  /// itself, which already holds the whole transcript.
+  VtTerminalScrollbar? get viewportScrollbar => null;
+
+  /// Records the scroll intent only. Web paints the formatter [snapshot],
+  /// which does not depend on the engine viewport, so these scroll methods
+  /// mirror the native controller's signatures without driving the engine.
+  void scrollViewportByRows(int deltaRows) {
+    if (deltaRows > 0) {
+      _viewportFollowingBottom = false;
+    }
+  }
+
+  /// Records that the viewport left the live bottom.
+  void scrollViewportToTop() {
+    _viewportFollowingBottom = false;
+  }
+
+  /// Records that the viewport follows the live bottom again.
+  void scrollViewportToBottom() {
+    _viewportFollowingBottom = true;
+  }
+
+  /// Records whether [rowsFromBottom] leaves the live bottom.
+  void scrollViewportToOffsetFromBottom(int rowsFromBottom) {
+    _viewportFollowingBottom = rowsFromBottom <= 0;
+  }
+
+  /// Records that the viewport was moved into history.
+  void scrollViewportToRow(int row) {
+    _viewportFollowingBottom = false;
+  }
 
   /// No-op on web: the engine default-color render path is native-only.
   ///
@@ -219,6 +269,21 @@ class GhosttyTerminalController extends ChangeNotifier
     } finally {
       formatter.close();
     }
+  }
+
+  /// Not supported on web because the Wasm formatter cannot marshal a
+  /// [VtSelection].
+  String formatTerminalForSelection({
+    required VtSelection selection,
+    GhosttyFormatterFormat emit =
+        GhosttyFormatterFormat.GHOSTTY_FORMATTER_FORMAT_PLAIN,
+    bool unwrap = false,
+    bool trim = true,
+    VtFormatterTerminalExtra extra = const VtFormatterTerminalExtra(),
+  }) {
+    throw UnsupportedError(
+      'Selection-restricted terminal formatting is not supported on web.',
+    );
   }
 
   /// Marks the transport session as started and records launch metadata.
@@ -390,6 +455,7 @@ class GhosttyTerminalController extends ChangeNotifier
     }
 
     terminal.reset();
+    _viewportFollowingBottom = true;
     _refreshSnapshot();
     _markDirty();
   }

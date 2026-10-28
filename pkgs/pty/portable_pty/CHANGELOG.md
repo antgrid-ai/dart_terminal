@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.0.7-beta.2+antgrid.1
+
+- Merged upstream 0.0.7-beta.2. The Dart side moves to `native_prebuilt` 0.5,
+  Code Assets 2.0 and Hooks 2.2; the native prebuilts stay on this fork's
+  `portable_pty-v0.0.6+antgrid.2` release, whose iOS dylibs upstream still
+  ships as static archives.
+
+## 0.0.7-beta.2
+
+- Enforced 16 KB ELF `LOAD` alignment for Android native libraries.
+- Added Android page-size verification to native source recipes and CI.
+- Updated the verified prebuilt release metadata and checksums to the beta.2
+  artifacts for every supported target.
+
+## 0.0.7-beta.1
+
+- Updated to `native_prebuilt` 0.5.0, Code Assets 2.0, and Hooks 2.2.
+- Kept Rust source fallback on the declarative `native_prebuilt.yaml` recipes,
+  with no `native_toolchain_rust` package dependency.
+- Raised the minimum Dart SDK to 3.13.
 ## 0.0.6+antgrid.2
 
 - iOS prebuilts ship a dylib instead of a static archive, and the build hook no

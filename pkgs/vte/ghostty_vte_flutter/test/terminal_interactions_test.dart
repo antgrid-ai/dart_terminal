@@ -138,5 +138,39 @@ void main() {
 
       expect(openedUri, 'https://example.com');
     });
+
+    test('hyperlink policy permits only HTTP and HTTPS URLs', () {
+      expect(
+        ghosttyTerminalIsAllowedHyperlink('https://example.com/path'),
+        isTrue,
+      );
+      expect(
+        ghosttyTerminalIsAllowedHyperlink('http://localhost:8080'),
+        isTrue,
+      );
+      expect(ghosttyTerminalIsAllowedHyperlink('file:///etc/passwd'), isFalse);
+      expect(ghosttyTerminalIsAllowedHyperlink('custom://open-me'), isFalse);
+      expect(ghosttyTerminalIsAllowedHyperlink('not a uri'), isFalse);
+    });
+
+    test(
+      'hyperlink opener leaves the scheme policy to a host callback',
+      () async {
+        // The host routes its own schemes (Antgrid's in-app file links) and
+        // decides what to refuse; only the launcher fallback filters schemes.
+        final opened = <String>[];
+        for (final uri in [
+          'file:///etc/passwd',
+          'antgrid-path:?p=src%2Fa.ts',
+        ]) {
+          await ghosttyTerminalOpenHyperlink(
+            uri,
+            onOpenHyperlink: (uri) async => opened.add(uri),
+          );
+        }
+
+        expect(opened, ['file:///etc/passwd', 'antgrid-path:?p=src%2Fa.ts']);
+      },
+    );
   });
 }

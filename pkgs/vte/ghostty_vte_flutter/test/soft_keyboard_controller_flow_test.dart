@@ -3,6 +3,7 @@
 // Locks in that IME deltas (insertions AND deletions) still reach the
 // transport when the keyboard is summoned via the controller instead of
 // focus-gain.
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -141,29 +142,33 @@ void main() {
     expect(backspaces, 1, reason: 'deletion delta must yield one backspace');
   }, variant: _android);
 
-  testWidgets('controller.toggle() raises then dismisses the keyboard', (
-    tester,
-  ) async {
-    final focusNode = FocusNode();
-    addTearDown(focusNode.dispose);
-    final softKeyboard = GhosttyTerminalSoftKeyboardController();
-    await tester.pumpWidget(buildView(focusNode, softKeyboard));
-    await tester.pump();
+  testWidgets(
+    'controller.toggle() raises then dismisses the keyboard',
+    (tester) async {
+      final focusNode = FocusNode();
+      addTearDown(focusNode.dispose);
+      final softKeyboard = GhosttyTerminalSoftKeyboardController();
+      await tester.pumpWidget(buildView(focusNode, softKeyboard));
+      await tester.pump();
 
-    // Suppressed focus-gain: down until the button asks for it.
-    expect(softKeyboard.isVisible, isFalse);
-    expect(tester.testTextInput.hasAnyClients, isFalse);
+      // Suppressed focus-gain: down until the button asks for it.
+      expect(softKeyboard.isVisible, isFalse);
+      expect(tester.testTextInput.hasAnyClients, isFalse);
 
-    softKeyboard.toggle(); // down -> up
-    await tester.pump();
-    expect(softKeyboard.isVisible, isTrue);
-    expect(tester.testTextInput.hasAnyClients, isTrue);
+      softKeyboard.toggle(); // down -> up
+      await tester.pump();
+      expect(softKeyboard.isVisible, isTrue);
+      expect(tester.testTextInput.hasAnyClients, isTrue);
 
-    softKeyboard.toggle(); // up -> down (second press dismisses)
-    await tester.pump();
-    expect(softKeyboard.isVisible, isFalse);
-    expect(tester.testTextInput.hasAnyClients, isFalse);
-  }, variant: _android);
+      softKeyboard.toggle(); // up -> down (second press dismisses)
+      await tester.pump();
+      expect(softKeyboard.isVisible, isFalse);
+      expect(tester.testTextInput.hasAnyClients, isFalse);
+      // Web never builds the IME bridge, whatever the target platform says.
+    },
+    variant: _android,
+    skip: kIsWeb,
+  );
 
   testWidgets(
     'controller.show() before focus lands still yields working backspace',

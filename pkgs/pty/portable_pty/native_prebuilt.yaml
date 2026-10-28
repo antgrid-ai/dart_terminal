@@ -24,7 +24,8 @@ release:
   # by grepping the version for a dash, so a dash-suffixed tag is silently
   # classed a prerelease — which skips the lockfile and asset-hash jobs and
   # leaves both stale against the release they describe. A `+` has no such
-  # effect, and it keeps the tag equal to the pubspec version.
+  # effect. The tag can lag the pubspec version: 0.0.7-beta.2+antgrid.1 still
+  # ships these 0.0.6+antgrid.2 binaries, since the Rust source is unchanged.
   tag: portable_pty-v0.0.6+antgrid.2
 
 variables:
@@ -63,8 +64,14 @@ build:
           working_directory: "{{ source.path }}/rust"
           commands:
             - [cross, build, --manifest-path, "{{ variables.cargo_manifest }}", --release, --target, "{{ target.rust_target }}"]
+        - id: verify_page_size
+          type: command
+          needs: [build]
+          commands:
+            - [sh, -ceu, "tool=$(command -v readelf || command -v llvm-readelf || true); [ -n \"$tool\" ] || { echo \"readelf or llvm-readelf is required\" >&2; exit 1; }; if ! headers=$(\"$tool\" -lW \"$1\"); then echo \"failed to inspect ELF program headers\" >&2; exit 1; fi; found=0; for alignment in $(printf '%s\\n' \"$headers\" | awk '$1 == \"LOAD\" {print $NF}'); do found=1; if [ $((alignment)) -lt 16384 ]; then echo \"LOAD alignment $alignment is below 0x4000\" >&2; exit 1; fi; done; [ \"$found\" -eq 1 ] || { echo \"no ELF LOAD segments found\" >&2; exit 1; }", sh, "{{ variables.library_path }}"]
         - id: export
           type: export_artifact
+          needs: [verify_page_size]
           artifact: portable_pty_rs
           primary: "{{ variables.library_path }}"
 
