@@ -86,6 +86,7 @@ class GhosttyTerminalController extends ChangeNotifier
   String _title = 'Terminal';
   bool _running = false;
   int _revision = 0;
+  bool _viewportFollowingBottom = true;
   int _cols;
   int _rows;
 
@@ -126,6 +127,47 @@ class GhosttyTerminalController extends ChangeNotifier
 
   /// Web does not expose a native Ghostty render-state snapshot.
   GhosttyTerminalRenderSnapshot? get renderSnapshot => null;
+
+  /// Whether the viewport was last asked to follow the live bottom.
+  ///
+  /// Web has no engine viewport to read back, so this records the latest
+  /// request from the scroll methods below.
+  bool get isViewportAtBottom => _viewportFollowingBottom;
+
+  /// Always null on web: the wasm engine does not report scrollbar geometry.
+  ///
+  /// [GhosttyTerminalView] then sizes and scrolls the formatter [snapshot]
+  /// itself, which already holds the whole transcript.
+  VtTerminalScrollbar? get viewportScrollbar => null;
+
+  /// Records the scroll intent only. Web paints the formatter [snapshot],
+  /// which does not depend on the engine viewport, so these scroll methods
+  /// mirror the native controller's signatures without driving the engine.
+  void scrollViewportByRows(int deltaRows) {
+    if (deltaRows > 0) {
+      _viewportFollowingBottom = false;
+    }
+  }
+
+  /// Records that the viewport left the live bottom.
+  void scrollViewportToTop() {
+    _viewportFollowingBottom = false;
+  }
+
+  /// Records that the viewport follows the live bottom again.
+  void scrollViewportToBottom() {
+    _viewportFollowingBottom = true;
+  }
+
+  /// Records whether [rowsFromBottom] leaves the live bottom.
+  void scrollViewportToOffsetFromBottom(int rowsFromBottom) {
+    _viewportFollowingBottom = rowsFromBottom <= 0;
+  }
+
+  /// Records that the viewport was moved into history.
+  void scrollViewportToRow(int row) {
+    _viewportFollowingBottom = false;
+  }
 
   /// No-op on web: the engine default-color render path is native-only.
   ///
@@ -413,6 +455,7 @@ class GhosttyTerminalController extends ChangeNotifier
     }
 
     terminal.reset();
+    _viewportFollowingBottom = true;
     _refreshSnapshot();
     _markDirty();
   }

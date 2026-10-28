@@ -39,6 +39,10 @@
 // push/pop and leaves the last-set SGR active — it validates the resulting
 // color value, NOT correct push/pop semantics. See xtpushsgr_test.dart.
 
+// Reads its fixtures through dart:io.
+@TestOn('vm')
+library;
+
 import 'dart:convert';
 import 'dart:io';
 
