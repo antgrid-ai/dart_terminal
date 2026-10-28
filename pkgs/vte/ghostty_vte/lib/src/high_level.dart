@@ -3831,30 +3831,22 @@ final class VtTerminal {
     bindings.GhosttyTerminal terminal,
     int maxScrollback,
   ) {
-    _checkNonNegative(maxScrollback, 'maxScrollback');
-    if (maxScrollback == 0) {
+    _setOptionalSize(
+      terminal,
+      bindings.GhosttyTerminalOption.GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_BYTES,
+      maxScrollback == 0 ? 0 : null,
+      'ghostty_terminal_set(scrollback_max_bytes)',
+    );
+    if (maxScrollback > 0) {
       _setOptionalSize(
         terminal,
         bindings
             .GhosttyTerminalOption
-            .GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_BYTES,
-        0,
-        'ghostty_terminal_set(scrollback_max_bytes)',
+            .GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_LINES,
+        maxScrollback,
+        'ghostty_terminal_set(scrollback_max_lines)',
       );
-      return;
     }
-    _setOptionalSize(
-      terminal,
-      bindings.GhosttyTerminalOption.GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_BYTES,
-      null,
-      'ghostty_terminal_set(scrollback_max_bytes)',
-    );
-    _setOptionalSize(
-      terminal,
-      bindings.GhosttyTerminalOption.GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_LINES,
-      maxScrollback,
-      'ghostty_terminal_set(scrollback_max_lines)',
-    );
   }
 
   /// Reads back the limit [_setScrollbackLimit] applied, where a zero byte cap
@@ -4498,16 +4490,12 @@ final class VtTerminal {
 
   void _terminalSetSize(bindings.GhosttyTerminalOption option, int value) {
     _ensureOpen();
-    final out = calloc<ffi.Size>();
-    try {
-      out.value = _checkNonNegative(value, 'value');
-      _checkResult(
-        bindings.ghostty_terminal_set(_handle, option, out.cast()),
-        'ghostty_terminal_set',
-      );
-    } finally {
-      calloc.free(out);
-    }
+    _setOptionalSize(
+      _handle,
+      option,
+      _checkNonNegative(value, 'value'),
+      'ghostty_terminal_set',
+    );
   }
 
   /// Reads a borrowed [GhosttyString] from the terminal and copies it into a

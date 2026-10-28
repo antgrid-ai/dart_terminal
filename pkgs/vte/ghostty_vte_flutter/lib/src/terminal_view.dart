@@ -1236,26 +1236,26 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
     });
   }
 
+  /// The engine snapshot when the view paints from it, else null — the view
+  /// then paints the formatter transcript.
+  GhosttyTerminalRenderSnapshot? get _paintedRenderSnapshot =>
+      _paintedEngineSnapshot(widget.renderer, widget.controller.renderSnapshot);
+
   bool get _hasBlinkingContent {
-    final renderSnapshot = widget.controller.renderSnapshot;
-    if (_focusNode.hasFocus && (renderSnapshot?.cursor.blinking ?? false)) {
+    if (_focusNode.hasFocus &&
+        (widget.controller.renderSnapshot?.cursor.blinking ?? false)) {
       return true;
     }
-    if (widget.renderer == GhosttyTerminalRendererMode.renderState &&
-        renderSnapshot != null &&
-        renderSnapshot.hasViewportData) {
-      // Runs on every controller notification, so skip rows Ghostty reports
-      // unstyled: only a styled cell can carry SGR 5.
-      return renderSnapshot.rowsData.any(
-        (row) => row.styled && row.cells.any((cell) => cell.style.blink),
-      );
+    final render = _paintedRenderSnapshot;
+    if (render != null) {
+      return render.hasBlinkingText;
     }
     // Every other case paints from the transcript (formatter mode, and the
     // render-state fallback with no engine viewport — permanently so on web),
-    // so reading it here costs nothing extra. Render-state mode with engine
-    // data must not: the controller builds the transcript lazily, and forcing
-    // it on every notification would put three full-scrollback formatter
-    // passes back on the output path.
+    // so reading it here builds nothing the painter would not. Painting from
+    // the engine must not: the controller builds the transcript lazily, and
+    // forcing it here would run three full-scrollback formatter passes per
+    // notification.
     return widget.controller.snapshot.lines.any(
       (line) => line.runs.any((run) => run.style.blink),
     );
@@ -1536,10 +1536,8 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
   }
 
   String _resolveSelectionText(GhosttyTerminalSelection selection) {
-    final renderSnapshot = widget.controller.renderSnapshot;
-    if (widget.renderer == GhosttyTerminalRendererMode.renderState &&
-        renderSnapshot != null &&
-        renderSnapshot.hasViewportData) {
+    final renderSnapshot = _paintedRenderSnapshot;
+    if (renderSnapshot != null) {
       return _renderSnapshotTextForSelection(
         renderSnapshot,
         selection,
@@ -1617,10 +1615,8 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
       return explicit;
     }
 
-    final renderSnapshot = widget.controller.renderSnapshot;
-    if (widget.renderer == GhosttyTerminalRendererMode.renderState &&
-        renderSnapshot != null &&
-        renderSnapshot.hasViewportData) {
+    final renderSnapshot = _paintedRenderSnapshot;
+    if (renderSnapshot != null) {
       // First try to resolve the explicit OSC 8 hyperlink URI from the
       // native terminal grid reference.  This is more accurate than regex
       // URL detection because it surfaces application-set hyperlinks that
@@ -1660,10 +1656,8 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
   GhosttyTerminalSelection? _resolveWordSelectionAt(
     GhosttyTerminalCellPosition position,
   ) {
-    final renderSnapshot = widget.controller.renderSnapshot;
-    if (widget.renderer == GhosttyTerminalRendererMode.renderState &&
-        renderSnapshot != null &&
-        renderSnapshot.hasViewportData) {
+    final renderSnapshot = _paintedRenderSnapshot;
+    if (renderSnapshot != null) {
       return _renderSnapshotWordSelectionAt(
         renderSnapshot,
         position,
@@ -1686,10 +1680,8 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
     int extentRow, {
     bool walkWrapChain = true,
   }) {
-    final renderSnapshot = widget.controller.renderSnapshot;
-    if (widget.renderer == GhosttyTerminalRendererMode.renderState &&
-        renderSnapshot != null &&
-        renderSnapshot.hasViewportData) {
+    final renderSnapshot = _paintedRenderSnapshot;
+    if (renderSnapshot != null) {
       return _renderSnapshotLineSelectionBetweenRows(
         renderSnapshot,
         baseRow,
@@ -3067,14 +3059,8 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
 
   /// The engine render snapshot the link classes derive from, or null when
   /// there is no quiet predicate or nothing is painted from the engine.
-  GhosttyTerminalRenderSnapshot? _linkRenderSnapshot() {
-    if (widget.isQuietHyperlink == null ||
-        widget.renderer != GhosttyTerminalRendererMode.renderState) {
-      return null;
-    }
-    final render = widget.controller.renderSnapshot;
-    return render != null && render.hasViewportData ? render : null;
-  }
+  GhosttyTerminalRenderSnapshot? _linkRenderSnapshot() =>
+      widget.isQuietHyperlink == null ? null : _paintedRenderSnapshot;
 
   void _syncLinkBlocks(
     GhosttyTerminalRenderSnapshot render,
@@ -4577,6 +4563,20 @@ class _TerminalSelectionHandlePainter extends CustomPainter {
   }
 }
 
+/// The engine snapshot when [renderer] paints from it, else null — the view
+/// then paints the formatter transcript. The one rule for which source is on
+/// screen, shared by the painter and by everything that must agree with it
+/// (selection, links, blink detection).
+GhosttyTerminalRenderSnapshot? _paintedEngineSnapshot(
+  GhosttyTerminalRendererMode renderer,
+  GhosttyTerminalRenderSnapshot? snapshot,
+) =>
+    renderer == GhosttyTerminalRendererMode.renderState &&
+        snapshot != null &&
+        snapshot.hasViewportData
+    ? snapshot
+    : null;
+
 class _GhosttyTerminalPainter extends CustomPainter {
   _GhosttyTerminalPainter({
     required this.revision,
@@ -4772,10 +4772,8 @@ class _GhosttyTerminalPainter extends CustomPainter {
     canvas.save();
     // Match the hard cell-background edges where the grid meets padding.
     canvas.clipRect(contentRect, doAntiAlias: false);
-    final nativeRender = renderSnapshot;
-    if (renderer == GhosttyTerminalRendererMode.renderState &&
-        nativeRender != null &&
-        nativeRender.hasViewportData) {
+    final nativeRender = _paintedEngineSnapshot(renderer, renderSnapshot);
+    if (nativeRender != null) {
       // Respect widget defaults for the viewport baseline while still mapping
       // native explicit colors against Ghostty's original defaults.
       canvas.drawRect(contentRect, Paint()..color = backgroundColor);
@@ -4795,7 +4793,7 @@ class _GhosttyTerminalPainter extends CustomPainter {
         layer: GhosttyTerminalKittyPlacementLayer.belowBackground,
         placements: nativeRender.kittyPlacements,
       );
-      _paintNativeRenderState(
+      void paintPhase(_NativeRenderPhase phase) => _paintNativeRenderState(
         canvas,
         contentTop: contentTop,
         visibleStartLine: visibleStartLine,
@@ -4806,40 +4804,17 @@ class _GhosttyTerminalPainter extends CustomPainter {
         linePixels: linePixels,
         rowsData: nativeRender.rowsData,
         runsByRow: nativeRuns,
-        phase: _NativeRenderPhase.backgrounds,
+        phase: phase,
       );
+      paintPhase(_NativeRenderPhase.backgrounds);
       _paintKittyPlacements(
         canvas,
         contentTop: contentTop,
         layer: GhosttyTerminalKittyPlacementLayer.belowText,
         placements: nativeRender.kittyPlacements,
       );
-      _paintNativeRenderState(
-        canvas,
-        contentTop: contentTop,
-        visibleStartLine: visibleStartLine,
-        defaultForeground: foregroundColor,
-        defaultBackground: backgroundColor,
-        nativeDefaultForeground: nativeRender.foregroundColor,
-        nativeDefaultBackground: nativeRender.backgroundColor,
-        linePixels: linePixels,
-        rowsData: nativeRender.rowsData,
-        runsByRow: nativeRuns,
-        phase: _NativeRenderPhase.selection,
-      );
-      _paintNativeRenderState(
-        canvas,
-        contentTop: contentTop,
-        visibleStartLine: visibleStartLine,
-        defaultForeground: foregroundColor,
-        defaultBackground: backgroundColor,
-        nativeDefaultForeground: nativeRender.foregroundColor,
-        nativeDefaultBackground: nativeRender.backgroundColor,
-        linePixels: linePixels,
-        rowsData: nativeRender.rowsData,
-        runsByRow: nativeRuns,
-        phase: _NativeRenderPhase.text,
-      );
+      paintPhase(_NativeRenderPhase.selection);
+      paintPhase(_NativeRenderPhase.text);
       _paintKittyPlacements(
         canvas,
         contentTop: contentTop,
@@ -4964,7 +4939,7 @@ class _GhosttyTerminalPainter extends CustomPainter {
       for (var runIndex = 0; runIndex < line.runs.length; runIndex++) {
         final run = line.runs[runIndex];
         final style = resolvedStyles[runIndex];
-        if (run.style.blink && !blinkPhaseVisible) {
+        if (_hiddenByBlink(run.style.blink)) {
           x += run.cells * charWidth;
           continue;
         }
@@ -5061,16 +5036,17 @@ class _GhosttyTerminalPainter extends CustomPainter {
     // is one, and fall back to the parsed position only where no engine exists
     // (web). Both index the visible window from its top, which is why this is
     // gated on being scrolled to the bottom.
+    final engineRender = renderSnapshot;
     if (showCursor &&
         scrollOffsetLines == 0 &&
-        nativeRender != null &&
-        nativeRender.hasViewportData) {
+        engineRender != null &&
+        engineRender.hasViewportData) {
       _paintNativeCursor(
         canvas,
         contentTop: contentTop,
         linePixels: linePixels,
-        rowsData: nativeRender.rowsData,
-        cursor: nativeRender.cursor,
+        rowsData: engineRender.rowsData,
+        cursor: engineRender.cursor,
         color: cursorColor,
         blinkPhaseVisible: blinkPhaseVisible,
       );
@@ -5189,12 +5165,12 @@ class _GhosttyTerminalPainter extends CustomPainter {
   /// transcript is touched, and every other path draws from it. Testing only
   /// `renderSnapshot == null` would miss the formatter renderer mode and an
   /// engine snapshot with no viewport data, both of which paint the transcript.
-  bool get _paintsTranscript {
-    final native = renderSnapshot;
-    return renderer != GhosttyTerminalRendererMode.renderState ||
-        native == null ||
-        !native.hasViewportData;
-  }
+  /// Whether SGR 5 text is in its hidden phase. The text passes and the
+  /// cursor's glyph redraw must agree, or the cursor reveals hidden text.
+  bool _hiddenByBlink(bool blink) => blink && !blinkPhaseVisible;
+
+  bool get _paintsTranscript =>
+      _paintedEngineSnapshot(renderer, renderSnapshot) == null;
 
   bool _formatterTranscriptChanged(_GhosttyTerminalPainter oldDelegate) {
     // `oldDelegate._snapshot` is the transcript that painter actually drew;
@@ -5261,7 +5237,7 @@ class _GhosttyTerminalPainter extends CustomPainter {
         continue;
       }
       for (final run in runs) {
-        if (run.width <= 0 || (run.style.blink && !blinkPhaseVisible)) {
+        if (run.width <= 0 || _hiddenByBlink(run.style.blink)) {
           continue;
         }
         final width = run.width * charWidth;
@@ -5707,6 +5683,9 @@ class _GhosttyTerminalPainter extends CustomPainter {
     if (cursor.col! < 0 || cursor.col! >= cols) {
       return;
     }
+    if (cursor.blinking && focused && !blinkPhaseVisible) {
+      return;
+    }
     final widthCells = cursor.onWideTail ? 2 : 1;
     final startCol = cursor.onWideTail
         ? math.max(0, cursor.col! - 1)
@@ -5731,9 +5710,6 @@ class _GhosttyTerminalPainter extends CustomPainter {
       cursorRect.width,
       devicePixelRatio,
     );
-    if (cursor.blinking && focused && !blinkPhaseVisible) {
-      return;
-    }
     // Guest cursor shape and blink mode cannot communicate local focus: a
     // steady beam must become just as clearly inactive as a blinking block.
     if (!focused) {
@@ -5842,7 +5818,7 @@ class _GhosttyTerminalPainter extends CustomPainter {
     // the cursor to reveal.
     if (cell == null ||
         cell.style.invisible ||
-        (cell.style.blink && !blinkPhaseVisible) ||
+        _hiddenByBlink(cell.style.blink) ||
         cell.text.trim().isEmpty) {
       return;
     }
@@ -5890,7 +5866,7 @@ class _GhosttyTerminalPainter extends CustomPainter {
     final run = line.runAtCell(column);
     if (run == null ||
         run.style.invisible ||
-        (run.style.blink && !blinkPhaseVisible) ||
+        _hiddenByBlink(run.style.blink) ||
         text.trim().isEmpty) {
       return;
     }

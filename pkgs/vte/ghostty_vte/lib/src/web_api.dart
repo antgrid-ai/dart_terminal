@@ -3698,10 +3698,11 @@ final class VtTerminal {
         // Same limit as native: [maxScrollback] rows, with the engine's
         // default 10,000-byte cap lifted so it cannot undercut them, and zero
         // set through that byte cap, the one that turns scrollback off.
-        if (_maxScrollback == 0) {
-          _terminalSetSize(_ghosttyTerminalOptScrollbackMaxBytes, 0);
-        } else {
-          _terminalClearSize(_ghosttyTerminalOptScrollbackMaxBytes);
+        _terminalSetSize(
+          _ghosttyTerminalOptScrollbackMaxBytes,
+          _maxScrollback == 0 ? 0 : null,
+        );
+        if (_maxScrollback > 0) {
           _terminalSetSize(
             _ghosttyTerminalOptScrollbackMaxLines,
             _maxScrollback,
@@ -3723,10 +3724,7 @@ final class VtTerminal {
       _maxScrollback = 0 {
     _cols = _terminalUint16(_ghosttyTerminalDataCols);
     _rows = _terminalUint16(_ghosttyTerminalDataRows);
-    _maxScrollback =
-        _terminalOptionalSize(_ghosttyTerminalDataScrollbackMaxBytes) == 0
-        ? 0
-        : _terminalOptionalSize(_ghosttyTerminalDataScrollbackMaxLines) ?? 0;
+    _maxScrollback = _queryScrollbackLimit();
   }
 
   final _GhosttyWasmRuntime _wasm;
@@ -4236,6 +4234,15 @@ final class VtTerminal {
     }
   }
 
+  /// Reads back the limit the constructor applied, where a zero byte cap
+  /// stands for no scrollback; mirrors native `_queryScrollbackLimit`.
+  int _queryScrollbackLimit() {
+    if (_terminalOptionalSize(_ghosttyTerminalDataScrollbackMaxBytes) == 0) {
+      return 0;
+    }
+    return _terminalOptionalSize(_ghosttyTerminalDataScrollbackMaxLines) ?? 0;
+  }
+
   int? _terminalOptionalSize(int data) {
     final out = _wasm.allocUsize();
     if (out == 0) {
@@ -4292,8 +4299,17 @@ final class VtTerminal {
     }
   }
 
-  void _terminalSetSize(int option, int value) {
+  /// Sets a `size_t` terminal option; null passes a NULL pointer, which the
+  /// engine reads as "no limit".
+  void _terminalSetSize(int option, int? value) {
     _ensureOpen();
+    if (value == null) {
+      _checkResult(
+        _wasm.callInt('ghostty_terminal_set', <Object>[_handle, option, 0]),
+        'ghostty_terminal_set',
+      );
+      return;
+    }
     final out = _wasm.allocUsize();
     if (out == 0) {
       throw GhosttyVtError(
@@ -4310,15 +4326,6 @@ final class VtTerminal {
     } finally {
       _wasm.freeUsize(out);
     }
-  }
-
-  /// Passes a NULL value pointer, which the engine reads as "no limit".
-  void _terminalClearSize(int option) {
-    _ensureOpen();
-    _checkResult(
-      _wasm.callInt('ghostty_terminal_set', <Object>[_handle, option, 0]),
-      'ghostty_terminal_set',
-    );
   }
 
   void _terminalSetBool(int option, bool value) {

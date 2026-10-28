@@ -681,6 +681,7 @@ final class GhosttyTerminalRenderSnapshot {
     this.kittyImages = const <int, GhosttyTerminalKittyImage>{},
     this.kittyPlacements = const <GhosttyTerminalKittyPlacement>[],
     this.hasUnresolvedKittyVirtualPlacements = false,
+    this.hasBlinkingText = false,
   });
 
   /// The visible viewport width in cells.
@@ -713,6 +714,12 @@ final class GhosttyTerminalRenderSnapshot {
   /// Whether any Kitty Unicode placeholder could not be matched to an image
   /// placement and was therefore skipped.
   final bool hasUnresolvedKittyVirtualPlacements;
+
+  /// Whether any cell in [rowsData] has SGR 5 (blink) set.
+  ///
+  /// Recorded while the rows are built, so the view can decide whether to run
+  /// its blink timer without rescanning every cell on each notification.
+  final bool hasBlinkingText;
 
   /// Whether this snapshot contains row data for the current viewport.
   bool get hasViewportData => rowsData.isNotEmpty;

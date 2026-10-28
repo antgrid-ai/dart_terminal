@@ -1469,6 +1469,7 @@ GhosttyTerminalRenderSnapshot _toRenderSnapshot(
     return toColor(rawCell.colorRgb!);
   }
 
+  var hasBlinkingText = false;
   final rows = snapshot.rowsData
       .map(
         (row) => GhosttyTerminalRenderRow(
@@ -1513,11 +1514,15 @@ GhosttyTerminalRenderSnapshot _toRenderSnapshot(
                       backgroundColor: bgColor,
                     );
                   }(),
-                  style:
-                      GhosttyTerminalResolvedStyle.fromNativeStyleWithRenderColors(
-                        style: cell.style,
-                        colors: snapshot.colors,
-                      ),
+                  style: () {
+                    final style =
+                        GhosttyTerminalResolvedStyle.fromNativeStyleWithRenderColors(
+                          style: cell.style,
+                          colors: snapshot.colors,
+                        );
+                    hasBlinkingText |= style.blink;
+                    return style;
+                  }(),
                 ),
               )
               .toList(growable: false),
@@ -1552,6 +1557,7 @@ GhosttyTerminalRenderSnapshot _toRenderSnapshot(
     kittyImages: kitty.images,
     kittyPlacements: kitty.placements,
     hasUnresolvedKittyVirtualPlacements: kitty.hasUnresolvedVirtualPlacements,
+    hasBlinkingText: hasBlinkingText,
   );
 }
 
