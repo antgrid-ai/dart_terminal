@@ -1069,6 +1069,10 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
       _autoScrollSession.reset();
       _disposeDecodedKittyImages();
       _syncAnimatedRenderState();
+    } else if (oldWidget.renderer != widget.renderer) {
+      // Blink detection reads a different source per renderer, so an idle
+      // terminal must re-evaluate it rather than wait for the next output.
+      _syncAnimatedRenderState(resetBlinkPhase: false);
     }
     if (oldWidget.focusNode != widget.focusNode) {
       _focusNode.removeListener(_handleFocusChanged);
@@ -1237,18 +1241,21 @@ class _GhosttyTerminalViewState extends State<GhosttyTerminalView> {
     if (_focusNode.hasFocus && (renderSnapshot?.cursor.blinking ?? false)) {
       return true;
     }
-    if (widget.renderer == GhosttyTerminalRendererMode.renderState) {
+    if (widget.renderer == GhosttyTerminalRendererMode.renderState &&
+        renderSnapshot != null &&
+        renderSnapshot.hasViewportData) {
       // Runs on every controller notification, so skip rows Ghostty reports
       // unstyled: only a styled cell can carry SGR 5.
-      return renderSnapshot?.rowsData.any(
-            (row) => row.styled && row.cells.any((cell) => cell.style.blink),
-          ) ??
-          false;
+      return renderSnapshot.rowsData.any(
+        (row) => row.styled && row.cells.any((cell) => cell.style.blink),
+      );
     }
-    // Formatter mode paints from the transcript, so reading it here costs
-    // nothing extra. Render-state mode must not: the controller builds the
-    // transcript lazily, and forcing it on every notification would put three
-    // full-scrollback formatter passes back on the output path.
+    // Every other case paints from the transcript (formatter mode, and the
+    // render-state fallback with no engine viewport — permanently so on web),
+    // so reading it here costs nothing extra. Render-state mode with engine
+    // data must not: the controller builds the transcript lazily, and forcing
+    // it on every notification would put three full-scrollback formatter
+    // passes back on the output path.
     return widget.controller.snapshot.lines.any(
       (line) => line.runs.any((run) => run.style.blink),
     );
@@ -5831,7 +5838,12 @@ class _GhosttyTerminalPainter extends CustomPainter {
       return;
     }
     final cell = _cellAtColumn(row, column);
-    if (cell == null || cell.style.invisible || cell.text.trim().isEmpty) {
+    // An SGR 5 cell in its off phase was not drawn, so there is nothing for
+    // the cursor to reveal.
+    if (cell == null ||
+        cell.style.invisible ||
+        (cell.style.blink && !blinkPhaseVisible) ||
+        cell.text.trim().isEmpty) {
       return;
     }
     _paintCursorGlyph(
@@ -5876,7 +5888,10 @@ class _GhosttyTerminalPainter extends CustomPainter {
     required Color cursorFill,
   }) {
     final run = line.runAtCell(column);
-    if (run == null || run.style.invisible || text.trim().isEmpty) {
+    if (run == null ||
+        run.style.invisible ||
+        (run.style.blink && !blinkPhaseVisible) ||
+        text.trim().isEmpty) {
       return;
     }
     // The formatter path resolves colors through `_ResolvedTerminalStyle`

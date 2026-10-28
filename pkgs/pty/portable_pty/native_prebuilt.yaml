@@ -24,7 +24,8 @@ release:
   # by grepping the version for a dash, so a dash-suffixed tag is silently
   # classed a prerelease — which skips the lockfile and asset-hash jobs and
   # leaves both stale against the release they describe. A `+` has no such
-  # effect, and it keeps the tag equal to the pubspec version.
+  # effect. The tag can lag the pubspec version: 0.0.7-beta.2+antgrid.1 still
+  # ships these 0.0.6+antgrid.2 binaries, since the Rust source is unchanged.
   tag: portable_pty-v0.0.6+antgrid.2
 
 variables:

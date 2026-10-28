@@ -252,9 +252,11 @@ class GhosttyTerminalController extends ChangeNotifier
     if (_engineBackground != null) {
       terminal.defaultBackgroundColor = colorToVtRgb(_engineBackground!);
     }
-    if (_engineCursor != null) {
-      terminal.defaultCursorColor = colorToVtRgb(_engineCursor!);
-    }
+    // Unlike fg/bg, a null cursor is a real state — the view's cursorColor is
+    // nullable and falls back to the engine's — so it must clear a color an
+    // earlier push set, or that color outlives the override that set it.
+    final cursor = _engineCursor;
+    terminal.defaultCursorColor = cursor == null ? null : colorToVtRgb(cursor);
   }
 
   /// Current formatted plain-text terminal snapshot.
