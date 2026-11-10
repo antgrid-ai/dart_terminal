@@ -1,3 +1,6 @@
+import 'dart:io';
+
+import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ghostty_vte_flutter/ghostty_vte_flutter.dart';
 
@@ -8,13 +11,21 @@ void main() {
       platformEnvironment: const <String, String>{
         'HOME': '/tmp/demo-home',
         'SHELL': '/bin/zsh',
+        'ComSpec': r'C:\Windows\System32\cmd.exe',
       },
     );
 
     expect(launches, hasLength(1));
-    expect(launches.single.label, 'user shell');
-    expect(launches.single.shell, '/bin/zsh');
-    expect(launches.single.arguments, const <String>['-i']);
+    final isWindows = !kIsWeb && Platform.isWindows;
+    expect(launches.single.label, isWindows ? 'cmd.exe' : 'user shell');
+    expect(
+      launches.single.shell,
+      isWindows ? r'C:\Windows\System32\cmd.exe' : '/bin/zsh',
+    );
+    expect(
+      launches.single.arguments,
+      isWindows ? const <String>[] : const <String>['-i'],
+    );
     expect(launches.single.environment?['TERM'], 'xterm-256color');
     expect(
       launches.single.environment?['XDG_CONFIG_HOME'],
