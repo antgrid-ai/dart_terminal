@@ -1276,44 +1276,116 @@ final class VtRowSnapshot {
   }
 }
 
-/// Snapshot of a raw terminal cell.
-/// Reusable out-pointers for the cell getters in this file.
+enum _CellField {
+  contentTag(bindings.GhosttyCellData.GHOSTTY_CELL_DATA_CONTENT_TAG),
+  codepoint(bindings.GhosttyCellData.GHOSTTY_CELL_DATA_CODEPOINT),
+  wide(bindings.GhosttyCellData.GHOSTTY_CELL_DATA_WIDE),
+  hasText(bindings.GhosttyCellData.GHOSTTY_CELL_DATA_HAS_TEXT),
+  hasStyling(bindings.GhosttyCellData.GHOSTTY_CELL_DATA_HAS_STYLING),
+  styleId(bindings.GhosttyCellData.GHOSTTY_CELL_DATA_STYLE_ID),
+  hasHyperlink(bindings.GhosttyCellData.GHOSTTY_CELL_DATA_HAS_HYPERLINK),
+  isProtected(bindings.GhosttyCellData.GHOSTTY_CELL_DATA_PROTECTED),
+  semanticContent(bindings.GhosttyCellData.GHOSTTY_CELL_DATA_SEMANTIC_CONTENT);
+
+  const _CellField(this.key);
+  final bindings.GhosttyCellData key;
+}
+
+/// Isolate-local scratch avoids native allocations on every cell and row.
 ///
-/// Every `ghostty_cell_get` and render-cursor fetch writes through a
-/// caller-provided pointer, so the straightforward spelling allocates and frees
-/// one per field per cell - around a dozen malloc/free pairs per cell, tens of
-/// thousands per viewport walk, for values that never outlive the call that
-/// reads them. One set per cursor is safe because each value is read before the
-/// next field is fetched.
+/// Each unpack consumes its results synchronously without callbacks into Dart,
+/// so scratch reads cannot overlap. Native finalization also reclaims these
+/// allocations when their Dart owner becomes unreachable.
+final class _CellBatch implements ffi.Finalizable {
+  static final _finalizer = ffi.NativeFinalizer(calloc.nativeFree);
+
+  _CellBatch()
+    : _fields = calloc<ffi.Uint32>(_CellField.values.length + 1),
+      _keys = calloc<ffi.UnsignedInt>(_CellField.values.length),
+      _outputs = calloc<ffi.Pointer<ffi.Void>>(_CellField.values.length) {
+    _finalizer.attach(this, _fields.cast());
+    _finalizer.attach(this, _keys.cast());
+    _finalizer.attach(this, _outputs.cast());
+    // Multi-get writes every result before Dart reads any, so outputs must not
+    // alias. Each uint32 slot fits and aligns its value, and typed reads use
+    // the API's actual widths regardless of endianness. The spare slot is for
+    // mutually exclusive palette/RGB queries, valid only for background cells.
+    for (final field in _CellField.values) {
+      _keys[field.index] = field.key.value;
+      _outputs[field.index] = (_fields + field.index).cast();
+    }
+  }
+
+  final ffi.Pointer<ffi.Uint32> _fields;
+  final ffi.Pointer<ffi.UnsignedInt> _keys;
+  final ffi.Pointer<ffi.Pointer<ffi.Void>> _outputs;
+
+  void read(bindings.DartGhosttyCell cell) {
+    // A failed batch may have written only a prefix; never expose that result.
+    _checkResult(
+      bindings.ghostty_cell_get_multi(
+        cell,
+        _CellField.values.length,
+        _keys,
+        _outputs,
+        ffi.nullptr,
+      ),
+      'cell_get_multi',
+    );
+  }
+
+  int uint32(_CellField field) => _fields[field.index];
+  int uint16(_CellField field) =>
+      (_fields + field.index).cast<ffi.Uint16>().value;
+  bool boolean(_CellField field) =>
+      (_fields + field.index).cast<ffi.Bool>().value;
+
+  int readColorPalette(bindings.DartGhosttyCell cell) {
+    final output = (_fields + _CellField.values.length).cast<ffi.Uint8>();
+    _checkResult(
+      bindings.ghostty_cell_get(
+        cell,
+        bindings.GhosttyCellData.GHOSTTY_CELL_DATA_COLOR_PALETTE,
+        output.cast(),
+      ),
+      'cell_get(color_palette)',
+    );
+    return output.value;
+  }
+
+  VtRgbColor readColorRgb(bindings.DartGhosttyCell cell) {
+    final output = (_fields + _CellField.values.length)
+        .cast<bindings.GhosttyColorRgb>();
+    _checkResult(
+      bindings.ghostty_cell_get(
+        cell,
+        bindings.GhosttyCellData.GHOSTTY_CELL_DATA_COLOR_RGB,
+        output.cast(),
+      ),
+      'cell_get(color_rgb)',
+    );
+    return _rgbFromNative(output.ref);
+  }
+}
+
+final _CellBatch _cellBatch = _CellBatch();
+
+/// Row-cursor-owned scratch for the render-state reads around a cell unpack.
 final class _CellScratch {
   _CellScratch()
-    : u8 = calloc<ffi.Uint8>(),
-      u16 = calloc<ffi.Uint16>(),
-      u32 = calloc<ffi.Uint32>(),
-      b = calloc<ffi.Bool>(),
-      rgb = calloc<bindings.GhosttyColorRgb>(),
-      raw = calloc<bindings.GhosttyCell>(),
+    : raw = calloc<bindings.GhosttyCell>(),
       style = calloc<bindings.GhosttyStyle>(),
       graphemeLen = calloc<ffi.Uint32>();
 
-  final ffi.Pointer<ffi.Uint8> u8;
-  final ffi.Pointer<ffi.Uint16> u16;
-  final ffi.Pointer<ffi.Uint32> u32;
-  final ffi.Pointer<ffi.Bool> b;
-  final ffi.Pointer<bindings.GhosttyColorRgb> rgb;
   final ffi.Pointer<bindings.GhosttyCell> raw;
   final ffi.Pointer<bindings.GhosttyStyle> style;
   final ffi.Pointer<ffi.Uint32> graphemeLen;
-
   ffi.Pointer<ffi.Uint32> _graphemeBuf = ffi.nullptr;
   int _graphemeCap = 0;
 
-  /// A codepoint buffer of at least [len], grown in place and reused.
   ffi.Pointer<ffi.Uint32> graphemeBuffer(int len) {
     if (len > _graphemeCap) {
-      if (_graphemeCap != 0) {
-        calloc.free(_graphemeBuf);
-      }
+      if (_graphemeCap != 0) calloc.free(_graphemeBuf);
       _graphemeBuf = calloc<ffi.Uint32>(len);
       _graphemeCap = len;
     }
@@ -1329,11 +1401,6 @@ final class _CellScratch {
     calloc.free(graphemeLen);
     calloc.free(style);
     calloc.free(raw);
-    calloc.free(rgb);
-    calloc.free(b);
-    calloc.free(u32);
-    calloc.free(u16);
-    calloc.free(u8);
   }
 }
 
@@ -1358,6 +1425,7 @@ const _unstyledStyle = VtStyle(
   underline: bindings.GhosttySgrUnderline.GHOSTTY_SGR_UNDERLINE_NONE,
 );
 
+/// Snapshot of a raw terminal cell.
 final class VtCellSnapshot {
   const VtCellSnapshot({
     required this.codepoint,
@@ -1430,105 +1498,36 @@ final class VtCellSnapshot {
       bindings.GhosttyCellSemanticContent.GHOSTTY_CELL_SEMANTIC_OUTPUT;
 
   factory VtCellSnapshot.fromRaw(bindings.DartGhosttyCell cell) {
-    final scratch = _CellScratch();
-    try {
-      return VtCellSnapshot._unpack(cell, scratch);
-    } finally {
-      scratch.free();
-    }
+    return VtCellSnapshot._unpack(cell);
   }
 
-  /// Unpacks [cell] through caller-owned [scratch].
-  ///
-  /// A `GhosttyCell` is an opaque uint64 and every field is a separate
-  /// `ghostty_cell_get`, so this is the hot path of any viewport walk. A caller
-  /// unpacking more than one cell must reuse a single [_CellScratch] rather
-  /// than paying an allocation per field.
-  factory VtCellSnapshot._unpack(
-    bindings.DartGhosttyCell cell,
-    _CellScratch scratch,
-  ) {
-    int getUint32(bindings.GhosttyCellData data) {
-      _checkResult(
-        bindings.ghostty_cell_get(cell, data, scratch.u32.cast()),
-        'cell_get',
-      );
-      return scratch.u32.value;
-    }
-
-    bool getBool(bindings.GhosttyCellData data) {
-      _checkResult(
-        bindings.ghostty_cell_get(cell, data, scratch.b.cast()),
-        'cell_get',
-      );
-      return scratch.b.value;
-    }
-
+  factory VtCellSnapshot._unpack(bindings.DartGhosttyCell cell) {
+    final batch = _cellBatch..read(cell);
     final contentTag = bindings.GhosttyCellContentTag.fromValue(
-      getUint32(bindings.GhosttyCellData.GHOSTTY_CELL_DATA_CONTENT_TAG),
+      batch.uint32(_CellField.contentTag),
     );
-    final colorPaletteIndex =
+    final int? colorPaletteIndex =
         contentTag ==
             bindings.GhosttyCellContentTag.GHOSTTY_CELL_CONTENT_BG_COLOR_PALETTE
-        ? (() {
-            _checkResult(
-              bindings.ghostty_cell_get(
-                cell,
-                bindings.GhosttyCellData.GHOSTTY_CELL_DATA_COLOR_PALETTE,
-                scratch.u8.cast(),
-              ),
-              'cell_get',
-            );
-            return scratch.u8.value;
-          })()
+        ? batch.readColorPalette(cell)
         : null;
-    final colorRgb =
+    final VtRgbColor? colorRgb =
         contentTag ==
             bindings.GhosttyCellContentTag.GHOSTTY_CELL_CONTENT_BG_COLOR_RGB
-        ? (() {
-            _checkResult(
-              bindings.ghostty_cell_get(
-                cell,
-                bindings.GhosttyCellData.GHOSTTY_CELL_DATA_COLOR_RGB,
-                scratch.rgb.cast(),
-              ),
-              'cell_get',
-            );
-            return _rgbFromNative(scratch.rgb.ref);
-          })()
+        ? batch.readColorRgb(cell)
         : null;
 
     return VtCellSnapshot(
-      codepoint: getUint32(
-        bindings.GhosttyCellData.GHOSTTY_CELL_DATA_CODEPOINT,
-      ),
+      codepoint: batch.uint32(_CellField.codepoint),
       contentTag: contentTag,
-      wide: bindings.GhosttyCellWide.fromValue(
-        getUint32(bindings.GhosttyCellData.GHOSTTY_CELL_DATA_WIDE),
-      ),
-      hasText: getBool(bindings.GhosttyCellData.GHOSTTY_CELL_DATA_HAS_TEXT),
-      hasStyling: getBool(
-        bindings.GhosttyCellData.GHOSTTY_CELL_DATA_HAS_STYLING,
-      ),
-      styleId: (() {
-        _checkResult(
-          bindings.ghostty_cell_get(
-            cell,
-            bindings.GhosttyCellData.GHOSTTY_CELL_DATA_STYLE_ID,
-            scratch.u16.cast(),
-          ),
-          'cell_get',
-        );
-        return scratch.u16.value;
-      })(),
-      hasHyperlink: getBool(
-        bindings.GhosttyCellData.GHOSTTY_CELL_DATA_HAS_HYPERLINK,
-      ),
-      isProtected: getBool(
-        bindings.GhosttyCellData.GHOSTTY_CELL_DATA_PROTECTED,
-      ),
+      wide: bindings.GhosttyCellWide.fromValue(batch.uint32(_CellField.wide)),
+      hasText: batch.boolean(_CellField.hasText),
+      hasStyling: batch.boolean(_CellField.hasStyling),
+      styleId: batch.uint16(_CellField.styleId),
+      hasHyperlink: batch.boolean(_CellField.hasHyperlink),
+      isProtected: batch.boolean(_CellField.isProtected),
       semanticContent: bindings.GhosttyCellSemanticContent.fromValue(
-        getUint32(bindings.GhosttyCellData.GHOSTTY_CELL_DATA_SEMANTIC_CONTENT),
+        batch.uint32(_CellField.semanticContent),
       ),
       colorPaletteIndex: colorPaletteIndex,
       colorRgb: colorRgb,
@@ -2547,7 +2546,7 @@ final class VtRenderRowCellsCursor {
   final bindings.GhosttyRenderStateRowCells _handle;
 
   // Allocated on the first cell read. A row walk opens one cursor per row and
-  // a cursor may be opened only to be closed again, so eight malloc/free pairs
+  // a cursor may be opened only to be closed again, so native scratch allocations
   // must not be the price of admission.
   _CellScratch? _scratchOrNull;
   bool _closed = false;
@@ -2594,7 +2593,7 @@ final class VtRenderRowCellsCursor {
       ),
       'ghostty_render_state_row_cells_get',
     );
-    final raw = VtCellSnapshot._unpack(scratch.raw.value, scratch);
+    final raw = VtCellSnapshot._unpack(scratch.raw.value);
 
     // `hasStyling` is already unpacked above, so skipping the fetch for a cell
     // with no explicit style costs nothing to decide and removes an FFI
@@ -2617,33 +2616,48 @@ final class VtRenderRowCellsCursor {
       style = _unstyledStyle;
     }
 
-    _checkResult(
-      bindings.ghostty_render_state_row_cells_get(
-        _handle,
-        bindings
-            .GhosttyRenderStateRowCellsData
-            .GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_GRAPHEMES_LEN,
-        scratch.graphemeLen.cast(),
-      ),
-      'ghostty_render_state_row_cells_get',
-    );
-    final graphemeLen = scratch.graphemeLen.value;
     final String graphemes;
-    if (graphemeLen == 0) {
-      graphemes = '';
+    // Only multi-codepoint cells need their text read from the grapheme store.
+    // This mirrors the native rule in row_cells_get (third_party/ghostty/src/
+    // terminal/c/render.zig, the graphemes_len and graphemes_buf cases): a cell
+    // without text has no graphemes, and a cell that is not a grapheme cell has
+    // exactly its own codepoint, which is what `raw.text` gives (blank and
+    // background-only cells have codepoint zero, so they map to ''). Recheck
+    // this when syncing Ghostty; the resize test in
+    // test/render_cell_extraction_test.dart compares the two paths.
+    if (raw.contentTag !=
+        bindings
+            .GhosttyCellContentTag
+            .GHOSTTY_CELL_CONTENT_CODEPOINT_GRAPHEME) {
+      graphemes = raw.text;
     } else {
-      final buffer = scratch.graphemeBuffer(graphemeLen);
       _checkResult(
         bindings.ghostty_render_state_row_cells_get(
           _handle,
           bindings
               .GhosttyRenderStateRowCellsData
-              .GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_GRAPHEMES_BUF,
-          buffer.cast(),
+              .GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_GRAPHEMES_LEN,
+          scratch.graphemeLen.cast(),
         ),
         'ghostty_render_state_row_cells_get',
       );
-      graphemes = String.fromCharCodes(buffer.asTypedList(graphemeLen));
+      final graphemeLen = scratch.graphemeLen.value;
+      if (graphemeLen == 0) {
+        graphemes = '';
+      } else {
+        final buffer = scratch.graphemeBuffer(graphemeLen);
+        _checkResult(
+          bindings.ghostty_render_state_row_cells_get(
+            _handle,
+            bindings
+                .GhosttyRenderStateRowCellsData
+                .GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_GRAPHEMES_BUF,
+            buffer.cast(),
+          ),
+          'ghostty_render_state_row_cells_get',
+        );
+        graphemes = String.fromCharCodes(buffer.asTypedList(graphemeLen));
+      }
     }
 
     return VtRenderCellSnapshot(raw: raw, style: style, graphemes: graphemes);
